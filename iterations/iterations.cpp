@@ -232,8 +232,8 @@ void solve_linear_system_2x2(long double J11, long double J12, long double J21, 
  * @param H2_initial Output: The initial guess for H2_Hrms.
  */
 void get_initial_guesses(long double Htr_Hrms, long double &H1_initial, long double &H2_initial) {
-    H1_initial = 0.9552427998926L / (1.0L - 0.992405988921401L * exp(-1.42537392576977L * Htr_Hrms));
-    H2_initial = 1.054085273232950L + 0.9369023639428842L * pow(Htr_Hrms, 2.980718327103574L) / (pow(2.549022900471753L, 2.980718327103574L) + pow(Htr_Hrms, 2.980718327103574L));
+    H1_initial = 0.9718670705250743 + 1.115952604282648 * std::pow(Htr_Hrms, -0.7970446117540275) * std::exp(-1.449005086812895 * Htr_Hrms);
+    H2_initial = 1.059259665431797 + (0.2059286860468916 * Htr_Hrms) / (1.0 + 3.865701948059343 * std::pow(Htr_Hrms, -3.479682433107255));
 
     if (H1_initial <= 0.0L) H1_initial = numeric_limits<long double>::min();
     if (H2_initial <= 0.0L) H2_initial = numeric_limits<long double>::min();
