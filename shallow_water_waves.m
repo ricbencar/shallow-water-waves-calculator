@@ -257,14 +257,15 @@ end
 function [H1_initial, H2_initial] = get_initial_guesses(Htr_Hrms)
     LOCAL_EPS = 1e-16;
 
-    H1_initial = 0.9552427998926 / (1.0 - 0.992405988921401 * exp(-1.42537392576977 * Htr_Hrms));
-    H2_initial = 1.054085273232950 + 0.9369023639428842 * Htr_Hrms^2.980718327103574 / ...
-                 (2.549022900471753^2.980718327103574 + Htr_Hrms^2.980718327103574);
+    H1_initial = 0.9718670705250743 + 1.115952604282648 * Htr_Hrms^(-0.7970446117540275) * ...
+                 exp(-1.449005086812895 * Htr_Hrms);
+    H2_initial = 1.059259665431797 + (0.2059286860468916 * Htr_Hrms) / ...
+                 (1.0 + 3.865701948059343 * Htr_Hrms^(-3.479682433107255));
 
-    if H1_initial <= 0.0
+    if H1_initial <= 0.0 || isnan(H1_initial)
         H1_initial = LOCAL_EPS;
     end
-    if H2_initial <= 0.0
+    if H2_initial <= 0.0 || isnan(H2_initial)
         H2_initial = LOCAL_EPS;
     end
 end
