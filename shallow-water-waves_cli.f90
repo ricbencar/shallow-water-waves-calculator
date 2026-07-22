@@ -225,9 +225,10 @@ CONTAINS
     SUBROUTINE get_initial_guesses(Htr_Hrms_val, H1_initial, H2_initial)
         REAL(KIND=dp), INTENT(IN) :: Htr_Hrms_val
         REAL(KIND=dp), INTENT(OUT) :: H1_initial, H2_initial
-        H1_initial = 0.9552427998926_dp / (1.0_dp - 0.992405988921401_dp * EXP(-1.42537392576977_dp * Htr_Hrms_val))
-        H2_initial = 1.054085273232950_dp + 0.9369023639428842_dp * Htr_Hrms_val**2.980718327103574_dp / &
-                     (2.549022900471753_dp**2.980718327103574_dp + Htr_Hrms_val**2.980718327103574_dp)
+        H1_initial = 0.9718670705250743_dp + 1.115952604282648_dp * &
+                     Htr_Hrms_val**(-0.7970446117540275_dp) * EXP(-1.449005086812895_dp * Htr_Hrms_val)
+        H2_initial = 1.059259665431797_dp + (0.2059286860468916_dp * Htr_Hrms_val) / &
+                     (1.0_dp + 3.865701948059343_dp * Htr_Hrms_val**(-3.479682433107255_dp))
         IF (H1_initial <= 0.0_dp) H1_initial = TINY(1.0_dp)
         IF (H2_initial <= 0.0_dp) H2_initial = TINY(1.0_dp)
     END SUBROUTINE get_initial_guesses
