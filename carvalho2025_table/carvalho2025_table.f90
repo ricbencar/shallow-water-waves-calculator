@@ -471,10 +471,12 @@ CONTAINS
         ! @param H2_initial Output: The initial guess for H2_Hrms.
         REAL(KIND=8), INTENT(IN) :: Htr_Hrms_val
         REAL(KIND=8), INTENT(OUT) :: H1_initial, H2_initial
+        integer, parameter :: dp = kind(1.0d0)
 
-        H1_initial = 0.9552427998926_8 / (1.0_8 - 0.992405988921401_8 * EXP(-1.42537392576977_8 * Htr_Hrms_val))
-        H2_initial = 1.054085273232950_8 + 0.9369023639428842_8 * (Htr_Hrms_val**2.980718327103574_8) / &
-                     ((2.549022900471753_8**2.980718327103574_8) + (Htr_Hrms_val**2.980718327103574_8))
+        H1_initial = 0.9718670705250743_dp + 1.115952604282648_dp * &
+                     Htr_Hrms_val**(-0.7970446117540275_dp) * EXP(-1.449005086812895_dp * Htr_Hrms_val)
+        H2_initial = 1.059259665431797_dp + (0.2059286860468916_dp * Htr_Hrms_val) / &
+                     (1.0_dp + 3.865701948059343_dp * Htr_Hrms_val**(-3.479682433107255_dp))
 
         IF (H1_initial <= 0.0_8) H1_initial = TINY(1.0_8)
         IF (H2_initial <= 0.0_8) H2_initial = TINY(1.0_8)
