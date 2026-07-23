@@ -287,7 +287,7 @@ static inline void solve_linear_system_2x2(double J11, double J12, double J21, d
  * @brief Provides empirical initial guesses for H1_Hrms and H2_Hrms.
  */
 static void get_initial_guesses(double Htr_Hrms, double &H1_initial, double &H2_initial) {
-    H1_initial = 0.9718670705250743 + 1.115952604282648 * std::pow(Htr_Hrms, -0.7970446117540275) * std::exp(-1.449005086812895 * Htr_Hrms);
+    H1_initial = 2.244660800090239E-03 + std::pow(std::tanh(1.918610494219390E+00 * Htr_Hrms), 1.780892753373355E-01) / std::pow(std::tanh(std::sinh(1.009497360864962E+00 * Htr_Hrms)), 9.777939607559606E-01);
     H2_initial = 1.059259665431797 + (0.2059286860468916 * Htr_Hrms) / (1.0 + 3.865701948059343 * std::pow(Htr_Hrms, -3.479682433107255));
     if (H1_initial <= 0.0) H1_initial = LOCAL_EPS;
     if (H2_initial <= 0.0) H2_initial = LOCAL_EPS;
