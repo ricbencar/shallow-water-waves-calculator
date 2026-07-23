@@ -6,7 +6,7 @@
  * solver to find the parameters (H1/Hrms, H2/Hrms) of a Composite Weibull
  * distribution for a range of dimensionless transitional wave heights (Htr/Hrms).
  *
- * The program iterates through Htr/Hrms values from 0.1 to 3.5 (step 0.1).
+ * The program iterates through Htr/Hrms values from 0.01 to 3.5 (step 0.01).
  * For each value, it solves a system of two non-linear equations using a
  * Newton-Raphson method, with the core calculation logic being identical to
  * the one used in shallow-water-waves_cli.cpp.
@@ -232,7 +232,7 @@ void solve_linear_system_2x2(long double J11, long double J12, long double J21, 
  * @param H2_initial Output: The initial guess for H2_Hrms.
  */
 void get_initial_guesses(long double Htr_Hrms, long double &H1_initial, long double &H2_initial) {
-    H1_initial = 0.9718670705250743 + 1.115952604282648 * std::pow(Htr_Hrms, -0.7970446117540275) * std::exp(-1.449005086812895 * Htr_Hrms);
+    H1_initial = 2.244660800090239E-03 + std::pow(std::tanh(1.918610494219390E+00 * Htr_Hrms), 1.780892753373355E-01) / std::pow(std::tanh(std::sinh(1.009497360864962E+00 * Htr_Hrms)), 9.777939607559606E-01);
     H2_initial = 1.059259665431797 + (0.2059286860468916 * Htr_Hrms) / (1.0 + 3.865701948059343 * std::pow(Htr_Hrms, -3.479682433107255));
 
     if (H1_initial <= 0.0L) H1_initial = numeric_limits<long double>::min();
@@ -306,7 +306,7 @@ int newtonRaphsonSystemSolver(long double Htr_Hrms, long double &H1_Hrms, long d
 /**
  * @brief Main function of the program.
  *
- * This function iterates through Htr/Hrms values from 0.1 to 3.5,
+ * This function iterates through Htr/Hrms values from 0.01 to 3.5,
  * calls the Newton-Raphson solver for each, and writes the detailed
  * results to "output.txt". Finally, it calculates and prints summary
  * statistics about the number of iterations to the console.
@@ -327,9 +327,9 @@ int main()
     vector<int> iteration_counts;
     const int max_iterations = 100;
 
-    // Loop from 0.1 to 3.5 with a step of 0.1
+    // Loop from 0.01 to 3.5 with a step of 0.01
     // Use <= 3.51L to robustly handle floating-point comparisons
-    for (long double Htr_Hrms_val = 0.1L; Htr_Hrms_val <= 3.51L; Htr_Hrms_val += 0.1L) {
+    for (long double Htr_Hrms_val = 0.01L; Htr_Hrms_val <= 3.51L; Htr_Hrms_val += 0.01L) {
         long double H1_normalized;
         long double H2_normalized;
 
@@ -366,7 +366,7 @@ int main()
         // Re-open file in append mode to add the summary at the end.
         outputFile.open("output.txt", std::ios_base::app);
         if(outputFile.is_open()){
-            outputFile << "\n\n--- Iteration Statistics (for Htr/Hrms from 0.1 to 3.5) ---\n";
+            outputFile << "\n\n--- Iteration Statistics (for Htr/Hrms from 0.01 to 3.5) ---\n";
             outputFile << "Minimum iterations: " << min_iter << endl;
             outputFile << "Maximum iterations: " << max_iter << endl;
             outputFile << "Average iterations: " << fixed << setprecision(2) << average_iterations << endl;
@@ -375,7 +375,7 @@ int main()
         }
 
 
-        cout << "\n--- Iteration Statistics (for Htr/Hrms from 0.1 to 3.5) ---\n";
+        cout << "\n--- Iteration Statistics (for Htr/Hrms from 0.01 to 3.5) ---\n";
         cout << "Minimum iterations: " << min_iter << endl;
         cout << "Maximum iterations: " << max_iter << endl;
         cout << "Average iterations: " << fixed << setprecision(2) << average_iterations << endl;
