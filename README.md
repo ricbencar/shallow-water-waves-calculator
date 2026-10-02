@@ -8,7 +8,7 @@ The project computes characteristic individual-wave statistics from three local 
 - local still-water depth, $d$;
 - foreshore slope written as $1:M$, with $\tan\alpha=1/M$.
 
-The same computational model is provided as a C++ command-line program, a native Windows C++ graphical interface, a Fortran command-line program, a MATLAB function, and an interactive Jupyter notebook.
+The same computational model is provided as a C++ command-line program, a native Windows C++ graphical interface, a Fortran command-line program, a MATLAB function, an interactive Jupyter notebook, and an Android app.
 
 The implementation includes the deep-water convergence treatment discussed by Caires and Van Gent (2012): the Battjes-Groenendijk result is not permitted to exceed the corresponding Rayleigh value, and the program switches directly to Rayleigh statistics when the normalized transitional wave height is sufficiently large.
 
@@ -45,7 +45,7 @@ The program is a **point model**. It does not propagate a spectrum, solve wave t
 | 1998 | Groenendijk's MSc thesis and the WL \| Delft Hydraulics H3351 report developed and validated the Composed Weibull point model. | Established the two-branch distribution, its calibration database, the slope-dependent transition, and the calculation recipe. |
 | 2000 | Battjes and Groenendijk published the Composite Weibull Distribution in *Coastal Engineering*. | Provides the principal scientific model implemented by this repository. |
 | 2012 | Caires and Van Gent examined finite-depth and constant-depth behaviour and clarified deep-water convergence and flat-bottom limitations. | Motivates the Rayleigh switch, Rayleigh caps, and explicit warnings for constant-depth applications. |
-| Present implementation | The same equations are implemented in C++, Fortran, MATLAB, and Python/Jupyter. | Provides reproducible cross-language calculations and engineering reporting. |
+| Present implementation | The same equations are implemented in C++, Fortran, MATLAB, Python/Jupyter, and the Android app. | Provides reproducible cross-language calculations and engineering reporting. |
 
 ### From Gaussian surface elevation to individual wave heights
 
@@ -1352,7 +1352,7 @@ This example also demonstrates that the direct Rayleigh branch uses exact ratios
 
 ### Dependence on $H_{m0}/d$
 
-The degree of saturation is proportional to $H_{m0}/d$. Increasing local wave height at fixed depth, or reducing depth at fixed wave height, moves the distribution farther from Rayleigh. The largest changes generally occur in the high-$N$ statistics because breaking primarily suppresses the upper tail.
+The degree of saturation is proportional to $H_{m0}/d$. Increasing local wave height at fixed depth, or reducing depth at fixed wave height, moves the distribution farther from Rayleigh. The largest changes generally occur in the high-N statistics because breaking primarily suppresses the upper tail.
 
 ### Dependence on slope
 
@@ -1494,6 +1494,7 @@ For overtopping or structural calculations, verify which wave-height definition 
 | `shallow-water-waves_cli.f90` | Fortran command-line implementation |
 | `shallow_water_waves.m` | MATLAB function returning a results structure |
 | `shallow-water-waves.ipynb` | Python/Jupyter implementation, tables, and plots |
+| `android.apk` | Android Studio project for the Weibull Waves app |
 | `README.md` | theory, equations, limitations, build instructions, and usage |
 
 All implementations use the same physical parameterization, target statistics, Rayleigh limits, and nonlinear governing equations.
@@ -1588,6 +1589,29 @@ Enter:
 - `Beach slope m` for a slope $1:m$;
 
 then press **Compute**. The report is displayed in the window and written to `report.txt`.
+
+---
+
+## Weibull Waves Android app
+
+The Android Studio project is in the `android` directory. The app is written in Kotlin with Jetpack Compose and supports Android 6.0 (API 23) and newer.
+
+It accepts the same three local inputs used by the other implementations: $H_{m0}$, water depth $d$, and slope denominator $M$ for a slope $1:M$. It reports the selected distribution branch, calculated parameters, dimensional and normalized mean-high-wave statistics, diagnostic ratios, and a copyable or shareable engineering report. The `Weibull Theory` link opens an in-app explanation of the equations, numerical method, interpretation, and model limits.
+
+### Install `weibull.apk`
+
+1. Copy `weibull.apk` to the phone or download it directly to the phone.
+2. If requested, allow the browser or file manager opening the APK to install unknown apps.
+3. Open `weibull.apk`, approve the installation, and launch `Weibull Waves`.
+4. The install-from-source permission may be disabled again after installation.
+
+If Android reports that the app is not installed while an older copy is present, the installed copy may use a different signing certificate or a newer version code. Uninstalling the old copy normally resolves a certificate conflict, but it also removes that app's locally stored data.
+
+With Android Platform Tools and USB debugging enabled, installation can also be performed with:
+
+```bash
+adb install -r weibull.apk
+```
 
 ---
 
