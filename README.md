@@ -1605,8 +1605,6 @@ It accepts the same three local inputs used by the other implementations: $H_{m0
 3. Open `weibull.apk`, approve the installation, and launch `Weibull Waves`.
 4. The install-from-source permission may be disabled again after installation.
 
-If Android reports that the app is not installed while an older copy is present, the installed copy may use a different signing certificate or a newer version code. Uninstalling the old copy normally resolves a certificate conflict, but it also removes that app's locally stored data.
-
 With Android Platform Tools and USB debugging enabled, installation can also be performed with:
 
 ```bash
