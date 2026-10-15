@@ -1,6 +1,6 @@
 # Wave Height Distributions on Shallow Foreshores
 
-This document describes a multi-language engineering calculator for the local distribution of individual wave heights on shallow foreshores, based primarily on the **Composite Weibull Distribution** of Battjes and Groenendijk (2000).
+This document describes a coastal engineering calculator for the local distribution of individual wave heights on shallow foreshores, based primarily on the **Composite Weibull Distribution** of Battjes and Groenendijk (2000).
 
 The project computes characteristic individual-wave statistics from three local inputs:
 
@@ -1594,9 +1594,11 @@ then press **Compute**. The report is displayed in the window and written to `re
 
 ## Weibull Waves Android app
 
-The Android Studio project is in the `android` directory. The app is written in Kotlin with Jetpack Compose and supports Android 6.0 (API 23) and newer.
+The Android app is written in Kotlin with Jetpack Compose and supports Android 6.0 (API 23) and newer.
 
-It accepts the same three local inputs used by the other implementations: $H_{m0}$, water depth $d$, and slope denominator $M$ for a slope $1:M$. It reports the selected distribution branch, calculated parameters, dimensional and normalized mean-high-wave statistics, diagnostic ratios, and a copyable or shareable engineering report. The `Weibull Theory` link opens an in-app explanation of the equations, numerical method, interpretation, and model limits.
+It accepts the same three local inputs used by the other implementations: $H_{m0}$, water depth $d$, and slope denominator $M$ for a slope $1:M$. It reports the selected distribution branch, calculated parameters, dimensional and normalized mean-high-wave statistics, diagnostic ratios, and a copyable or shareable engineering report.
+
+The `Weibull Theory` link opens an in-app explanation of the equations, numerical method, interpretation, and model limits.
 
 ### Install `weibull.apk`
 
@@ -1734,67 +1736,6 @@ Recommended cross-language verification steps:
 7. Confirm both nonlinear residuals are below the specified tolerance.
 
 Minor floating-point differences are expected, but engineering outputs should agree to the displayed precision.
-
-### Residual and identity checks
-
-For a converged B&G solution, the following identities should be checked.
-
-Continuity:
-
-$$
-\left(\frac{\widetilde H_{tr}}{\widetilde H_1}\right)^{k_1} - \left(\frac{\widetilde H_{tr}}{\widetilde H_2}\right)^{k_2} \approx0.
-$$
-
-
-Second moment:
-
-$$
-\widetilde H_1^2 \gamma\left(1+\frac{2}{k_1},x_1\right) + \widetilde H_2^2 \Gamma\left(1+\frac{2}{k_2},x_2\right) \approx1.
-$$
-
-
-Monotonicity:
-
-$$
-H_{1/3}<H_{1/10}<H_{1/50}<H_{1/100}<H_{1/250}<H_{1/1000}.
-$$
-
-
-Rayleigh cap:
-
-$$
-H_{1/N}\leq C_NH_{m0}.
-$$
-
-
-Dimensional-normalized consistency:
-
-$$
-H_{1/N} = \widetilde H_{1/N}H_{rms}.
-$$
-
-
-The same checks should be applied automatically in regression tests wherever practical.
-
-### Reproducibility tolerance
-
-For identical inputs and the same distribution branch, cross-language values should generally agree much more closely than the engineering precision of the final result. Differences in the final few binary or printed digits may arise from:
-
-- the standard-library gamma implementation;
-- compiler floating-point optimization;
-- `fsolve` versus the explicit Newton iteration;
-- decimal output formatting;
-- intermediate rounding in notebook tables.
-
-A branch mismatch or a difference that changes engineering conclusions is not a normal floating-point effect and should be investigated.
-
-Useful regression cases should include:
-
-- a strongly depth-limited case with small $\widetilde H_{tr}$;
-- a typical shallow-foreshore case;
-- a case close to $\widetilde H_{tr}=2.75$;
-- a Rayleigh-branch case above the threshold;
-- invalid zero, negative, non-numeric, and non-finite inputs.
 
 ---
 
