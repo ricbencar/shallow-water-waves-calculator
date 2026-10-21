@@ -1,456 +1,267 @@
 function results = shallow_water_waves(HM0, DEPTH, M)
+%SHALLOW_WATER_WAVES Local individual-wave statistics on shallow foreshores.
+%   R = SHALLOW_WATER_WAVES(HM0, DEPTH, M) calculates the Composite Weibull
+%   Distribution (Battjes and Groenendijk) and Rayleigh-limited statistics.
+%   HM0 and DEPTH are in metres; M is the denominator of a 1:M slope.
+%   R contains numerical results and individual-wave statistics.
+%   The report is written to report.txt. Without an output argument it is
+%   also displayed in the MATLAB command window.
 %
-% Syntax:
-%   results = shallow_water_waves(HM0, DEPTH, M)
-%
-% Inputs:
-%   HM0   - significant spectral wave height, Hm0 [m]
-%   DEPTH - local water depth, d [m]
-%   M     - foreshore slope denominator for a 1:M slope [-]
-%
-% Output:
-%   results - structure containing the same calculated quantities as the
-%             C++ WaveAnalysisResults struct.
-%
+%   Example: R = shallow_water_waves(2.5, 5.0, 100);
 
-    if nargin ~= 3
-        error('shallow_water_waves requires exactly 3 inputs: HM0, DEPTH, M.');
-    end
-    if ~isnumeric(HM0) || prod(size(HM0)) ~= 1 || ~is_finite_value(HM0) || HM0 <= 0
-        error('HM0 must be a positive finite scalar.');
-    end
-    if ~isnumeric(DEPTH) || prod(size(DEPTH)) ~= 1 || ~is_finite_value(DEPTH) || DEPTH <= 0
-        error('DEPTH must be a positive finite scalar.');
-    end
-    if ~isnumeric(M) || prod(size(M)) ~= 1 || ~is_finite_value(M) || M <= 0
-        error('M must be a positive finite scalar.');
+    validateattributes(HM0, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'HM0', 1);
+    validateattributes(DEPTH, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'DEPTH', 2);
+    validateattributes(M, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'M', 3);
+    HM0 = double(HM0); DEPTH = double(DEPTH); M = double(M);
+    k1 = 2.0; k2 = 3.6;
+    ns = [3 10 50 100 250 1000];
+    rayleighFactors = [1.001075736951740, 1.272734273369137, ...
+        1.560113379974762, 1.668233372358517, ...
+        1.801017222497626, 1.984835590575388];
+    results = struct();
+    results.Hm0 = HM0; results.d = DEPTH; results.slopeM = M;
+    results.depth = DEPTH; results.slope_denominator = M;
+    results.tanAlpha = 1/M; results.slope = results.tanAlpha;
+    sigma = positive(HM0/4, 'Spectral standard deviation');
+    results.m0 = positive(sigma*sigma, 'Spectral variance');
+    results.saturation = positive(sigma/DEPTH, 'Saturation');
+    results.Hrms = positive((2.69+3.24*results.saturation)*sigma, 'Hrms');
+    results.Htr_dim = positive((0.35+5.8/M)*DEPTH, 'Transition height');
+    results.Htr = results.Htr_dim;
+    results.Htr_tilde = positive(results.Htr/results.Hrms, 'Normalized transition');
+    results.transition_normalized = results.Htr_tilde;
+    results.uses_cwd = results.Htr_tilde <= 2.75;
+    results.distribution_type = 'Rayleigh';
+    if results.uses_cwd, results.distribution_type = 'Composite Weibull (B&G)'; end
+    results.slope_outside_calibration = M < 20 || M > 250;
+    results.saturation_outside_observed_range = results.saturation < 0.025 || results.saturation > 0.16;
+    results.H1_Hrms = NaN; results.H2_Hrms = NaN;
+    results.H1_dim = NaN; results.H2_dim = NaN;
+    results.transition_exponent = NaN;
+    results.transition_exceedance_probability = NaN;
+    results.transition_recurrence_count = NaN;
+    results.moment_residual = NaN;
+    results.continuity_residual = NaN;
+    results.solver_iterations = 0;
+
+    if results.uses_cwd
+        t = results.Htr_tilde;
+        logt = log(t);
+        f = @(z) scalar_log_moment(z, logt, k1, k2);
+        za = -700; zb = log(64);
+        if ~(isfinite(f(za)) && isfinite(f(zb)) && f(za)>0 && f(zb)<0)
+            error('CWD scalar solution is outside the representable range.');
+        end
+        % MATLAB fzero employs a safeguarded Brent-type scalar algorithm.
+        options = optimset('TolX',2e-14,'MaxIter',200,'Display','off');
+        [z, residual, exitflag, output] = fzero(f,[za zb],options);
+        if exitflag <= 0 || ~isfinite(z) || abs(residual)>1e-10
+            error('CWD scalar solver did not converge.');
+        end
+        q = positive(exp(z), 'Transition exponent');
+        a1 = positive(t*exp(-z/k1), 'First Weibull scale');
+        a2 = positive(t*exp(-z/k2), 'Second Weibull scale');
+        results.H1_Hrms = a1; results.H2_Hrms = a2;
+        results.H1_dim = a1*results.Hrms;
+        results.H2_dim = a2*results.Hrms;
+        results.transition_exponent = q;
+        results.transition_exceedance_probability = exp(-q);
+        results.transition_recurrence_count = exp(q);
+        results.solver_iterations = output.iterations;
+        m2 = a1^2*gamma_lower(1+2/k1,q) + a2^2*gamma_upper(1+2/k2,q);
+        results.moment_residual = sqrt(m2)-1;
+        results.continuity_residual = (t/a1)^k1-(t/a2)^k2;
+        if ~isfinite(m2) || abs(results.moment_residual)>1e-10 || ...
+                abs(results.continuity_residual)>1e-10
+            error('CWD probability constraints were not satisfied.');
+        end
     end
 
-    results = initialize_results_struct();
-    results.Hm0 = HM0;
-    results.d = DEPTH;
-    results.slopeM = M;
-
-    [results, ok] = perform_wave_analysis(results);
-    if ~ok
-        error('Calculation failed.');
+    rayleighScale = positive(HM0/sqrt(2),'Rayleigh scale');
+    statistics = repmat(struct('N',0,'threshold',0,'rayleigh_threshold',0, ...
+        'mean_unlimited',0,'rayleigh_mean',0,'mean_final',0, ...
+        'mean_normalized',0,'rayleigh_limit_applied',false),1,numel(ns));
+    for i = 1:numel(ns)
+        N = ns(i); lnN = log(N);
+        s = statistics(i); s.N = N;
+        s.rayleigh_threshold = positive(rayleighScale*sqrt(lnN),'Rayleigh threshold');
+        s.rayleigh_mean = positive(rayleighFactors(i)*HM0,'Rayleigh mean');
+        if results.uses_cwd
+            if lnN < q
+                hn = a1*lnN^(1/k1);
+                moment = a1*gamma_interval(1+1/k1,lnN,q) + ...
+                         a2*gamma_upper(1+1/k2,q);
+            else
+                hn = a2*lnN^(1/k2);
+                moment = a2*gamma_upper(1+1/k2,lnN);
+            end
+            s.threshold = positive(hn*results.Hrms,'CWD threshold');
+            s.mean_unlimited = positive(N*moment*results.Hrms,'CWD mean');
+            s.mean_final = min(s.mean_unlimited,s.rayleigh_mean);
+            s.rayleigh_limit_applied = s.mean_unlimited > s.rayleigh_mean*(1+8*eps);
+        else
+            s.threshold = s.rayleigh_threshold;
+            s.mean_unlimited = s.rayleigh_mean;
+            s.mean_final = s.rayleigh_mean;
+        end
+        s.mean_normalized = positive(s.mean_final/results.Hrms,'Normalized mean');
+        if ~(s.mean_unlimited > s.threshold) || s.mean_final > s.rayleigh_mean*(1+1e-12)
+            error('Inconsistent wave-height statistics.');
+        end
+        if i>1
+            previous = statistics(i-1);
+            if ~(s.threshold>previous.threshold && ...
+                 s.mean_unlimited>previous.mean_unlimited && ...
+                 s.mean_final>previous.mean_final)
+                error('Wave-height ordering constraint not satisfied.');
+            end
+        end
+        statistics(i) = s;
+        suffix = sprintf('%d',N);
+        results.(['H1_' suffix '_dim']) = s.mean_final;
+        results.(['H1_' suffix '_Hrms']) = s.mean_normalized;
+        results.(['H_' suffix '_threshold']) = s.threshold;
+        results.(['H1_' suffix '_uncapped']) = s.mean_unlimited;
+        results.(['H1_' suffix '_rayleigh']) = s.rayleigh_mean;
+        results.(['H1_' suffix '_rayleigh_limit_applied']) = s.rayleigh_limit_applied;
+        if i>1
+            results.(['ratio_1_' suffix '_div_1_3']) = s.mean_final/statistics(1).mean_final;
+        end
     end
-
+    results.statistics = statistics;
     report = format_report(results);
-    write_report_to_file(report);
-
-    if nargout == 0
-        fprintf('%s', report);
-    end
-end
-
-
-function results = initialize_results_struct()
-    results = struct( ...
-        'Hm0', 0.0, ...
-        'd', 0.0, ...
-        'slopeM', 0.0, ...
-        'distribution_type', '', ...
-        'Hrms', 0.0, ...
-        'm0', 0.0, ...
-        'tanAlpha', 0.0, ...
-        'Htr_dim', 0.0, ...
-        'Htr_tilde', 0.0, ...
-        'H1_Hrms', 0.0, ...
-        'H2_Hrms', 0.0, ...
-        'H1_3_Hrms', 0.0, ...
-        'H1_10_Hrms', 0.0, ...
-        'H1_50_Hrms', 0.0, ...
-        'H1_100_Hrms', 0.0, ...
-        'H1_250_Hrms', 0.0, ...
-        'H1_1000_Hrms', 0.0, ...
-        'H1_dim', 0.0, ...
-        'H2_dim', 0.0, ...
-        'H1_3_dim', 0.0, ...
-        'H1_10_dim', 0.0, ...
-        'H1_50_dim', 0.0, ...
-        'H1_100_dim', 0.0, ...
-        'H1_250_dim', 0.0, ...
-        'H1_1000_dim', 0.0, ...
-        'ratio_1_10_div_1_3', 0.0, ...
-        'ratio_1_50_div_1_3', 0.0, ...
-        'ratio_1_100_div_1_3', 0.0, ...
-        'ratio_1_250_div_1_3', 0.0, ...
-        'ratio_1_1000_div_1_3', 0.0);
-end
-
-
-function [results, ok] = perform_wave_analysis(results)
+    fid = fopen('report.txt','w','n','UTF-8');
+    if fid < 0, error('Could not open report.txt for writing.'); end
     try
-        results.m0 = (results.Hm0 / 4.0)^2;
-        sqrt_m0 = sqrt(results.m0);
-        results.Hrms = (2.69 + 3.24 * sqrt_m0 / results.d) * sqrt_m0;
-
-        results.tanAlpha = 1.0 / results.slopeM;
-        results.Htr_dim = (0.35 + 5.8 * results.tanAlpha) * results.d;
-        if results.Hrms > 0.0
-            results.Htr_tilde = results.Htr_dim / results.Hrms;
-        else
-            results.Htr_tilde = 0.0;
-        end
-
-        if results.Htr_tilde > 2.75
-            results.distribution_type = 'Rayleigh';
-
-            results.H1_3_dim    = 1.001075736951740 * results.Hm0;
-            results.H1_10_dim   = 1.272734273369137 * results.Hm0;
-            results.H1_50_dim   = 1.560113379974762 * results.Hm0;
-            results.H1_100_dim  = 1.668233372358517 * results.Hm0;
-            results.H1_250_dim  = 1.801017222497626 * results.Hm0;
-            results.H1_1000_dim = 1.984835590575388 * results.Hm0;
-
-            if results.Hrms > 0.0
-                results.H1_3_Hrms    = results.H1_3_dim    / results.Hrms;
-                results.H1_10_Hrms   = results.H1_10_dim   / results.Hrms;
-                results.H1_50_Hrms   = results.H1_50_dim   / results.Hrms;
-                results.H1_100_Hrms  = results.H1_100_dim  / results.Hrms;
-                results.H1_250_Hrms  = results.H1_250_dim  / results.Hrms;
-                results.H1_1000_Hrms = results.H1_1000_dim / results.Hrms;
-            end
-        else
-            results.distribution_type = 'B&G';
-
-            [results.H1_Hrms, results.H2_Hrms, ok_solver] = newtonRaphsonSystemSolver(results.Htr_tilde, 100);
-            if ~ok_solver
-                error('Newton-Raphson solver failed to converge.');
-            end
-
-            results.H1_3_Hrms    = calculate_H1N(3.0,    results.H1_Hrms, results.H2_Hrms, results.Htr_tilde);
-            results.H1_10_Hrms   = calculate_H1N(10.0,   results.H1_Hrms, results.H2_Hrms, results.Htr_tilde);
-            results.H1_50_Hrms   = calculate_H1N(50.0,   results.H1_Hrms, results.H2_Hrms, results.Htr_tilde);
-            results.H1_100_Hrms  = calculate_H1N(100.0,  results.H1_Hrms, results.H2_Hrms, results.Htr_tilde);
-            results.H1_250_Hrms  = calculate_H1N(250.0,  results.H1_Hrms, results.H2_Hrms, results.Htr_tilde);
-            results.H1_1000_Hrms = calculate_H1N(1000.0, results.H1_Hrms, results.H2_Hrms, results.Htr_tilde);
-
-            results.H1_dim = results.H1_Hrms * results.Hrms;
-            results.H2_dim = results.H2_Hrms * results.Hrms;
-            results.H1_3_dim = results.H1_3_Hrms * results.Hrms;
-            results.H1_10_dim = results.H1_10_Hrms * results.Hrms;
-            results.H1_50_dim = results.H1_50_Hrms * results.Hrms;
-            results.H1_100_dim = results.H1_100_Hrms * results.Hrms;
-            results.H1_250_dim = results.H1_250_Hrms * results.Hrms;
-            results.H1_1000_dim = results.H1_1000_Hrms * results.Hrms;
-
-            results.H1_3_dim    = min(results.H1_3_dim,    1.001075736951740 * results.Hm0);
-            results.H1_10_dim   = min(results.H1_10_dim,   1.272734273369137 * results.Hm0);
-            results.H1_50_dim   = min(results.H1_50_dim,   1.560113379974762 * results.Hm0);
-            results.H1_100_dim  = min(results.H1_100_dim,  1.668233372358517 * results.Hm0);
-            results.H1_250_dim  = min(results.H1_250_dim,  1.801017222497626 * results.Hm0);
-            results.H1_1000_dim = min(results.H1_1000_dim, 1.984835590575388 * results.Hm0);
-        end
-
-        if results.H1_3_dim > 0.0
-            H1_3_Hrms_capped    = results.H1_3_dim    / results.Hrms;
-            H1_10_Hrms_capped   = results.H1_10_dim   / results.Hrms;
-            H1_50_Hrms_capped   = results.H1_50_dim   / results.Hrms;
-            H1_100_Hrms_capped  = results.H1_100_dim  / results.Hrms;
-            H1_250_Hrms_capped  = results.H1_250_dim  / results.Hrms;
-            H1_1000_Hrms_capped = results.H1_1000_dim / results.Hrms;
-
-            results.ratio_1_10_div_1_3   = H1_10_Hrms_capped   / H1_3_Hrms_capped;
-            results.ratio_1_50_div_1_3   = H1_50_Hrms_capped   / H1_3_Hrms_capped;
-            results.ratio_1_100_div_1_3  = H1_100_Hrms_capped  / H1_3_Hrms_capped;
-            results.ratio_1_250_div_1_3  = H1_250_Hrms_capped  / H1_3_Hrms_capped;
-            results.ratio_1_1000_div_1_3 = H1_1000_Hrms_capped / H1_3_Hrms_capped;
-        else
-            results.ratio_1_10_div_1_3   = 0.0;
-            results.ratio_1_50_div_1_3   = 0.0;
-            results.ratio_1_100_div_1_3  = 0.0;
-            results.ratio_1_250_div_1_3  = 0.0;
-            results.ratio_1_1000_div_1_3 = 0.0;
-        end
-
-        ok = true;
-    catch
-        ok = false;
+        nwrite = fprintf(fid,'%s',report);
+        if nwrite < numel(report), error('Incomplete report write.'); end
+        if fclose(fid)~=0, error('Could not close report.txt.'); end
+    catch ME
+        fclose(fid);
+        rethrow(ME);
     end
+    if nargout==0, fprintf('%s\n',report); end
 end
 
-
-function [H1_Hrms, H2_Hrms, ok] = newtonRaphsonSystemSolver(Htr_Hrms, maxit)
-    EPSILON = 1e-12;
-    JACOBIAN_DX = 1e-8;
-    LOCAL_EPS = 1e-16;
-
-    [H1_Hrms, H2_Hrms] = get_initial_guesses(Htr_Hrms);
-    ok = false;
-
-    for iter = 0:(maxit - 1)
-        f1_val = F1(H1_Hrms, H2_Hrms, Htr_Hrms);
-        f2_val = F2(H1_Hrms, H2_Hrms, Htr_Hrms);
-
-        if abs(f1_val) < EPSILON && abs(f2_val) < EPSILON
-            ok = true;
-            return;
-        end
-
-        J11 = (F1(H1_Hrms + JACOBIAN_DX, H2_Hrms, Htr_Hrms) - F1(H1_Hrms - JACOBIAN_DX, H2_Hrms, Htr_Hrms)) / (2.0 * JACOBIAN_DX);
-        J12 = (F1(H1_Hrms, H2_Hrms + JACOBIAN_DX, Htr_Hrms) - F1(H1_Hrms, H2_Hrms - JACOBIAN_DX, Htr_Hrms)) / (2.0 * JACOBIAN_DX);
-        J21 = (F2(H1_Hrms + JACOBIAN_DX, H2_Hrms, Htr_Hrms) - F2(H1_Hrms - JACOBIAN_DX, H2_Hrms, Htr_Hrms)) / (2.0 * JACOBIAN_DX);
-        J22 = (F2(H1_Hrms, H2_Hrms + JACOBIAN_DX, Htr_Hrms) - F2(H1_Hrms, H2_Hrms - JACOBIAN_DX, Htr_Hrms)) / (2.0 * JACOBIAN_DX);
-
-        [dH1, dH2] = solve_linear_system_2x2(J11, J12, J21, J22, -f1_val, -f2_val);
-
-        H1_Hrms = H1_Hrms + dH1;
-        H2_Hrms = H2_Hrms + dH2;
-
-        if H1_Hrms <= 0.0
-            H1_Hrms = LOCAL_EPS;
-        end
-        if H2_Hrms <= 0.0
-            H2_Hrms = LOCAL_EPS;
-        end
-    end
+function v = positive(v, name)
+    if ~(isfinite(v) && v>0), error('%s must be finite and positive.',name); end
 end
 
-
-function val = F1(H1_Hrms, H2_Hrms, Htr_Hrms)
-    K1 = 2.0;
-    K2 = 3.6;
-    DBL_MAX = 1.7976931348623157e308;
-
-    if H1_Hrms <= 0.0 || H2_Hrms <= 0.0
-        val = DBL_MAX;
-        return;
-    end
-
-    arg1 = (Htr_Hrms / H1_Hrms)^K1;
-    arg2 = (Htr_Hrms / H2_Hrms)^K2;
-    term1 = H1_Hrms * H1_Hrms * incomplete_gamma_lower(2.0 / K1 + 1.0, arg1);
-    term2 = H2_Hrms * H2_Hrms * incomplete_gamma_upper(2.0 / K2 + 1.0, arg2);
-    val = sqrt(max(0.0, term1 + term2)) - 1.0;
+function y = gamma_lower(a,x)
+    y = gamma(a)*gammainc(x,a,'lower');
 end
 
-
-function val = F2(H1_Hrms, H2_Hrms, Htr_Hrms)
-    K1 = 2.0;
-    K2 = 3.6;
-    DBL_MAX = 1.7976931348623157e308;
-
-    if H1_Hrms <= 0.0 || H2_Hrms <= 0.0
-        val = DBL_MAX;
-        return;
-    end
-
-    val = (Htr_Hrms / H1_Hrms)^K1 - (Htr_Hrms / H2_Hrms)^K2;
+function y = gamma_upper(a,x)
+    y = gamma(a)*gammainc(x,a,'upper');
 end
 
-
-function [dx1, dx2] = solve_linear_system_2x2(J11, J12, J21, J22, b1, b2)
-    determinant = J11 * J22 - J12 * J21;
-    if abs(determinant) < 1e-20
-        dx1 = 0.0;
-        dx2 = 0.0;
-        return;
+function y = gamma_interval(a,lo,hi)
+    if hi==lo, y=0; return; end
+    if ~(isfinite(lo) && isfinite(hi) && lo>=0 && hi>=lo)
+        error('Invalid incomplete gamma integration interval.');
     end
-
-    dx1 = (b1 * J22 - b2 * J12) / determinant;
-    dx2 = (J11 * b2 - J21 * b1) / determinant;
+    % Direct integration avoids subtracting nearly equal tail functions.
+    y = integral(@(u)u.^(a-1).*exp(-u),lo,hi, ...
+        'RelTol',2e-13,'AbsTol',1e-14);
+    y = positive(y,'Gamma interval integral');
 end
 
-
-function [H1_initial, H2_initial] = get_initial_guesses(Htr_Hrms)
-    LOCAL_EPS = 1e-16;
-
-    H1_initial = tanh(6.739139344110821e+00 * Htr_Hrms - 1.265095590917251e-02)^(-6.551633251836707e-01) / ...
-             tanh(sinh(6.947756601426412e-01 * Htr_Hrms + 7.908718490781483e-01))^5.484052848550241e+00;
-    H2_initial = 1.059259665431797 + (0.2059286860468916 * Htr_Hrms) / ...
-                 (1.0 + 3.865701948059343 * Htr_Hrms^(-3.479682433107255));
-
-    if H1_initial <= 0.0 || isnan(H1_initial)
-        H1_initial = LOCAL_EPS;
-    end
-    if H2_initial <= 0.0 || isnan(H2_initial)
-        H2_initial = LOCAL_EPS;
-    end
+function y = scalar_log_moment(z, logt, k1, k2)
+    q = exp(z);
+    kernel = exp(-2*z/k1)*gamma_lower(1+2/k1,q) + ...
+             exp(-2*z/k2)*gamma_upper(1+2/k2,q);
+    if ~(isfinite(kernel)&&kernel>0), error('Invalid CWD second-moment kernel.'); end
+    y = 2*logt + log(kernel);
 end
 
-
-function HN = calculate_HN(N, H1, H2, Htr)
-    EPSILON = 1e-12;
-    K1 = 2.0;
-    K2 = 3.6;
-
-    if N <= 1.0 || H1 <= 0.0 || H2 <= 0.0
-        error('Invalid arguments for calculate_HN.');
-    end
-
-    HN_candidate1 = H1 * (log(N)^(1.0 / K1));
-    if HN_candidate1 < Htr - EPSILON
-        HN = HN_candidate1;
+function text = format_report(r)
+    lines = {};
+    lines{end+1}='SHALLOW-WATER INDIVIDUAL WAVE-HEIGHT STATISTICS';
+    lines{end+1}=repmat('=',1,72);
+    lines{end+1}=''; lines{end+1}='INPUT PARAMETERS';
+    lines{end+1}=field('Spectral significant wave height Hm0 (m)',sprintf('%.4f',r.Hm0));
+    lines{end+1}=field('Still-water depth d (m)',sprintf('%.4f',r.d));
+    slopeText = regexprep(sprintf('%.4f',r.slopeM),'0+$','');
+    slopeText = regexprep(slopeText,'\.$','');
+    lines{end+1}=field('Foreshore slope',['1:' slopeText]);
+    lines{end+1}=field('tan(alpha)',sprintf('%.6f',r.tanAlpha));
+    lines{end+1}=''; lines{end+1}='LOCAL WAVE PARAMETERS';
+    lines{end+1}=field('Spectral variance m0 (m^2)',sprintf('%.9e',r.m0));
+    lines{end+1}=field('Individual-wave Hrms (m)',sprintf('%.6f',r.Hrms));
+    lines{end+1}=field('Degree of saturation sqrt(m0)/d',sprintf('%.6f',r.saturation));
+    lines{end+1}=field('Transitional wave height Htr (m)',sprintf('%.6f',r.Htr));
+    lines{end+1}=field('Normalized transition Htr/Hrms',sprintf('%.6f',r.Htr_tilde));
+    lines{end+1}=field('Distribution',r.distribution_type,false);
+    lines{end+1}=''; lines{end+1}='DISTRIBUTION PARAMETERS';
+    if r.uses_cwd
+        lines{end+1}=field('Normalized first Weibull scale H1/Hrms',sprintf('%.6f',r.H1_Hrms));
+        lines{end+1}=field('Normalized second Weibull scale H2/Hrms',sprintf('%.6f',r.H2_Hrms));
+        lines{end+1}=field('Dimensional Weibull scale H1 (m)',sprintf('%.6f',r.H1_dim));
+        lines{end+1}=field('Dimensional Weibull scale H2 (m)',sprintf('%.6f',r.H2_dim));
+        lines{end+1}=field('Transition exponent q',sprintf('%.6f',r.transition_exponent));
+        lines{end+1}=field('Probability P(H > Htr)',sprintf('%.9f',r.transition_exceedance_probability));
+        lines{end+1}=field('Equivalent transition recurrence Ntr',sprintf('%.6f waves',r.transition_recurrence_count));
     else
-        HN = H2 * (log(N)^(1.0 / K2));
+        lines{end+1}=field('Composite Weibull scales H1 and H2','N/A',false);
+        lines{end+1}=field('Composite Weibull transition exponent','N/A',false);
     end
-end
-
-
-function H1N = calculate_H1N(N_val, H1, H2, Htr)
-    EPSILON = 1e-12;
-    K1 = 2.0;
-    K2 = 3.6;
-
-    if N_val <= 1.0 || H1 <= 0.0 || H2 <= 0.0
-        error('Invalid arguments for calculate_H1N.');
+    lines{end+1}=''; lines{end+1}='WAVE-HEIGHT STATISTICS (m)';
+    lines{end+1}=statrow('HIGHEST','H_N','RAW MEAN','RAYLEIGH','FINAL MEAN','LIMIT');
+    lines{end+1}=statrow('FRACTION','THRESHOLD','H_(1/N)','H_(1/N)','H_(1/N)','APPLIED');
+    lines{end+1}=['  ' repmat('-',1,70)];
+    for s=r.statistics
+        if s.rayleigh_limit_applied, limit='YES'; else, limit='NO'; end
+        lines{end+1}=statrow(sprintf('1/%d',s.N),sprintf('%.4f',s.threshold), ...
+            sprintf('%.4f',s.mean_unlimited),sprintf('%.4f',s.rayleigh_mean), ...
+            sprintf('%.4f',s.mean_final),limit);
     end
-
-    H_N_val = calculate_HN(N_val, H1, H2, Htr);
-    term1_x_ln_Nval = log(N_val);
-    term2_a = 1.0 / K2 + 1.0;
-
-    if H_N_val < Htr - EPSILON
-        term1_a = 1.0 / K1 + 1.0;
-        term1_x_HtrH1 = (Htr / H1)^K1;
-        term2_x_HtrH2 = (Htr / H2)^K2;
-
-        gamma1 = incomplete_gamma_upper(term1_a, term1_x_ln_Nval) - incomplete_gamma_upper(term1_a, term1_x_HtrH1);
-        gamma2 = incomplete_gamma_upper(term2_a, term2_x_HtrH2);
-        H1N = N_val * (H1 * gamma1 + H2 * gamma2);
+    lines{end+1}=''; lines{end+1}='FINAL NORMALIZED MEAN-HIGH-WAVE HEIGHTS';
+    for s=r.statistics
+        lines{end+1}=field(sprintf('H_(1/%d) / Hrms',s.N),sprintf('%.7f',s.mean_normalized));
+    end
+    lines{end+1}=''; lines{end+1}='RATIOS RELATIVE TO THE HIGHEST ONE THIRD';
+    for s=r.statistics(2:end)
+        lines{end+1}=field(sprintf('H_(1/%d) / H_(1/3)',s.N), ...
+            sprintf('%.6f',s.mean_final/r.statistics(1).mean_final));
+    end
+    lines{end+1}=''; lines{end+1}='NUMERICAL DIAGNOSTICS';
+    if r.uses_cwd
+        lines{end+1}=field('Scalar root iterations',sprintf('%d',r.solver_iterations));
+        lines{end+1}=field('Second-moment residual',sprintf('%.10e',r.moment_residual));
+        lines{end+1}=field('Continuity exponent residual',sprintf('%.10e',r.continuity_residual));
     else
-        H1N = N_val * H2 * incomplete_gamma_upper(term2_a, term1_x_ln_Nval);
+        lines{end+1}=field('CWD nonlinear solver','N/A',false);
     end
-end
-
-
-function val = incomplete_gamma_lower(a, x)
-    MAXIT = 500;
-    LOCAL_EPS = 1e-16;
-    DBL_MIN = 2.2250738585072014e-308;
-
-    if a <= 0.0 || x < 0.0
-        val = NaN;
-        return;
-    end
-    if x == 0.0
-        val = 0.0;
-        return;
-    end
-
-    gln = gammaln(a);
-
-    if x < a + 1.0
-        ap = a;
-        sum_val = 1.0 / a;
-        del = sum_val;
-        for n_iter = 1:MAXIT
-            ap = ap + 1.0;
-            del = del * x / ap;
-            sum_val = sum_val + del;
-            if abs(del) < abs(sum_val) * LOCAL_EPS
-                val = sum_val * exp(-x + a * log(x) - gln) * gamma(a);
-                return;
-            end
+    lines{end+1}=''; lines{end+1}='INTERPRETATION';
+    lines{end+1}='  H_N is the height exceeded with probability 1/N.';
+    lines{end+1}='  H_(1/N) is the mean height of the highest 1/N fraction.';
+    lines{end+1}='  Both are individual-wave statistics, not storm maxima.';
+    lines{end+1}='  Mean-high-wave Rayleigh limits are applied separately.';
+    lines{end+1}='  H_N always refers to the selected underlying distribution.';
+    lines{end+1}='  The program uses local wave conditions; it does not propagate waves.';
+    if r.slope_outside_calibration || (r.uses_cwd && r.saturation_outside_observed_range)
+        lines{end+1}=''; lines{end+1}='APPLICABILITY NOTICE';
+        if r.slope_outside_calibration
+            lines{end+1}='  Foreshore slope is outside the laboratory slope range';
+            lines{end+1}='  1:20 to 1:250 of the Composite Weibull formulation.';
+            lines{end+1}='  Predictions for an extensive horizontal, constant-depth';
+            lines{end+1}='  seabed require a separate applicability assessment.';
         end
-        val = NaN;
-    else
-        b = x + 1.0 - a;
-        c = 1.0 / DBL_MIN;
-        d = 1.0 / b;
-        h = d;
-        for i = 1:MAXIT
-            an = -1.0 * i * (i - a);
-            b = b + 2.0;
-            d = an * d + b;
-            if abs(d) < DBL_MIN
-                d = DBL_MIN;
-            end
-            c = b + an / c;
-            if abs(c) < DBL_MIN
-                c = DBL_MIN;
-            end
-            d = 1.0 / d;
-            del = d * c;
-            h = h * del;
-            if abs(del - 1.0) < LOCAL_EPS
-                break;
-            end
+        if r.uses_cwd && r.saturation_outside_observed_range
+            lines{end+1}='  The degree of saturation is outside the approximate';
+            lines{end+1}='  interval represented by the original foreshore tests.';
+            lines{end+1}='  Interpretation requires engineering assessment.';
         end
-        p_normalized = 1.0 - (exp(-x + a * log(x) - gln) * h);
-        val = max(0.0, p_normalized) * gamma(a);
     end
+    text = strjoin(lines,sprintf('\n'));
 end
 
-
-function val = incomplete_gamma_upper(a, x)
-    if a <= 0.0 || x < 0.0
-        error('Invalid arguments for incomplete_gamma_upper.');
-    end
-    val = gamma(a) - incomplete_gamma_lower(a, x);
+function str = field(label,value,right)
+    if nargin<3, right=true; end
+    if right, str=sprintf('  %-42s : %16s',label,value);
+    else, str=sprintf('  %-42s : %s',label,value); end
 end
 
-
-function report = format_report(r)
-    nl = sprintf('\n');
-    report = [ ...
-        '======================', nl, ...
-        '   INPUT PARAMETERS', nl, ...
-        '======================', nl, ...
-        sprintf('Hm0 (m)         : %.4f%s', r.Hm0, nl), ...
-        sprintf('d (m)           : %.4f%s', r.d, nl), ...
-        sprintf('Beach slope (m) : %.4f   (tan(alpha) = %.4f)%s', r.slopeM, r.tanAlpha, nl), ...
-        nl, ...
-        'Distribution Used : ', r.distribution_type, nl, ...
-        nl, ...
-        '===========================', nl, ...
-        '   CALCULATED PARAMETERS', nl, ...
-        '===========================', nl, ...
-        sprintf('Free-surface variance m0 (m^2)   : %.4f%s', r.m0, nl), ...
-        sprintf('Mean square wave height Hrms (m) : %.4f%s', r.Hrms, nl), ...
-        sprintf('Transitional wave height Htr (m) : %.4f%s', r.Htr_dim, nl), ...
-        sprintf('Dimensionless H~_tr (Htr/Hrms)   : %.4f%s', r.Htr_tilde, nl), ...
-        nl, ...
-        '=========================================', nl, ...
-        '   DIMENSIONLESS WAVE HEIGHTS (H/Hrms)', nl, ...
-        '=========================================', nl, ...
-        sprintf('H1/Hrms       : %.4f%s', r.H1_Hrms, nl), ...
-        sprintf('H2/Hrms       : %.4f%s', r.H2_Hrms, nl), ...
-        sprintf('H1/3 / Hrms   : %.4f%s', r.H1_3_Hrms, nl), ...
-        sprintf('H1/10 / Hrms  : %.4f%s', r.H1_10_Hrms, nl), ...
-        sprintf('H1/50 / Hrms  : %.4f%s', r.H1_50_Hrms, nl), ...
-        sprintf('H1/100 / Hrms : %.4f%s', r.H1_100_Hrms, nl), ...
-        sprintf('H1/250 / Hrms : %.4f%s', r.H1_250_Hrms, nl), ...
-        sprintf('H1/1000 /Hrms : %.4f%s', r.H1_1000_Hrms, nl), ...
-        nl, ...
-        '==================================', nl, ...
-        '   DIMENSIONAL WAVE HEIGHTS (m)', nl, ...
-        '==================================', nl, ...
-        sprintf('H1 (m)        : %.4f%s', r.H1_dim, nl), ...
-        sprintf('H2 (m)        : %.4f%s', r.H2_dim, nl), ...
-        sprintf('H1/3 (m)      : %.4f%s', r.H1_3_dim, nl), ...
-        sprintf('H1/10 (m)     : %.4f%s', r.H1_10_dim, nl), ...
-        sprintf('H1/50 (m)     : %.4f%s', r.H1_50_dim, nl), ...
-        sprintf('H1/100 (m)    : %.4f%s', r.H1_100_dim, nl), ...
-        sprintf('H1/250 (m)    : %.4f%s', r.H1_250_dim, nl), ...
-        sprintf('H1/1000 (m)   : %.4f%s', r.H1_1000_dim, nl), ...
-        nl, ...
-        '=======================', nl, ...
-        '   DIAGNOSTIC RATIOS', nl, ...
-        '=======================', nl, ...
-        sprintf('(H1/10)/(H1/3)   : %.4f%s', r.ratio_1_10_div_1_3, nl), ...
-        sprintf('(H1/50)/(H1/3)   : %.4f%s', r.ratio_1_50_div_1_3, nl), ...
-        sprintf('(H1/100)/(H1/3)  : %.4f%s', r.ratio_1_100_div_1_3, nl), ...
-        sprintf('(H1/250)/(H1/3)  : %.4f%s', r.ratio_1_250_div_1_3, nl), ...
-        sprintf('(H1/1000)/(H1/3) : %.4f%s', r.ratio_1_1000_div_1_3, nl), ...
-        nl, ...
-        'End of Report', nl ...
-    ];
-end
-
-
-function write_report_to_file(report)
-    fid = fopen('report.txt', 'w');
-    if fid == -1
-        error('Could not open report.txt for writing.');
-    end
-    fprintf(fid, '%s', report);
-    fclose(fid);
-end
-
-
-function tf = is_finite_value(x)
-    tf = (~isnan(x)) && (~isinf(x));
+function str = statrow(fr,hn,raw,ray,fin,lim)
+    str=sprintf('  %-10s %11s %12s %12s %12s %8s',fr,hn,raw,ray,fin,lim);
 end

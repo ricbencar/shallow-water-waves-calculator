@@ -1,649 +1,788 @@
-!***********************************************************************
-! Program: shallow-water-waves_cli.f90
+! Shallow-Water Individual Wave-Height Statistics
 !
-! Detailed Description:
-! This program computes local shallow-foreshore wave-height distribution
-! parameters using a model based on the Composed Weibull distribution.
+! Command-line calculation of local zero-crossing wave-height statistics with
+! the Composite Weibull Distribution and Rayleigh limits. Input parameters:
+! Hm0 (m), still-water depth d (m), foreshore slope denominator M in 1:M.
 !
-! The command-line application performs the following:
-! 1. If three command-line arguments are provided, they are used as
-!    Hm0 (local significant spectral wave height), d (local water depth),
-!    and slopeM (beach slope 1:m). Otherwise, the program
-!    prompts the user for these values.
-! 2. Computes the following intermediate values:
-!    - Free-surface variance (m0) is calculated directly using m0 = (Hm0/4)^2.
-!    - Root-mean-square wave height (Hrms) is then calculated from m0
-!      using the equation: Hrms = (2.69 + 3.24*sqrt(m0)/d)*sqrt(m0).
-!    - A dimensional transitional wave height: Htr = (0.35 + 5.8*(1/m)) * d.
-!    - The dimensionless transitional parameter: H̃_tr = Htr / Hrms.
+! Build:
+!   gfortran -O2 -std=f2018 -Wall -Wextra -pedantic -ffree-line-length-none &
+!     shallow-water-waves_cli.f90 -o shallow-water-waves_cli_f
 !
-! 3. Calculates the dimensionless wave-height ratios (Hᵢ/Hrms)
-!    by solving a system of non-linear equations derived from the Composite Weibull
-!    distribution, ensuring the normalized Hrms of the distribution equals one.
-!    This involves using a Newton-Raphson matrix method for simultaneous root-finding
-!    and functions for unnormalized incomplete gamma calculations. These ratios are then
-!    converted to dimensional quantities (in meters) by multiplying with Hrms.
+! Use:
+!   ./shallow-water-waves_cli_f 2.5 5 100
+!   ./shallow-water-waves_cli_f 2.5 5 100 --output report.txt
+!   ./shallow-water-waves_cli_f --no-file
 !
-! 4. A detailed report is then generated (and written to "report.txt") with
-!    the input parameters, intermediate values, calculated ratios and computed
-!    dimensional wave heights, as well as diagnostic ratios.
-!
-! Overshoot-prevention logic:
-! To prevent the composite Weibull distribution from predicting wave heights
-! greater than the theoretical Rayleigh distribution (which is valid for deep
-! water), the following logic is applied:
-!
-! a) H_tr Threshold Switch: If the dimensionless transitional height (Htr/Hrms)
-!    is greater than 2.75, the conditions are considered deep-water dominant.
-!    The program bypasses the B&G calculation and uses established Rayleigh
-!    distribution values for all H1/N statistics.
-!
-! b) Capping Statistical Parameters: If the B&G calculation is performed, the
-!    resulting dimensional values for all H1/N are capped at their
-!    theoretical Rayleigh limits (e.g., H1/3 <= 1.001075*Hm0, H1/10 <= 1.272734*Hm0, etc.).
-!
-! Compilation Instructions (example using gfortran):
-!
-! gfortran -O3 -march=native -std=f2018 -Wall -Wextra -pedantic -Wconversion -static -fno-underscoring -o shallow-water-waves_cli shallow-water-waves_cli.f90
-!
-! To run with command-line arguments (e.g., Hm0=2.5, d=5, slopeM=100):
-! ./shallow-water-waves_cli 2.5 5 100
-!***********************************************************************
-PROGRAM ShallowWaterWaves
-    IMPLICIT NONE
+module shallow_water_wave_statistics
+    use iso_fortran_env, only: real64
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    implicit none
+    private
+    integer, parameter :: dp = real64
+    real(dp), parameter :: k1 = 2.0_dp, k2 = 3.6_dp, rayleigh_switch = 2.75_dp
+    real(dp), parameter :: numerical_tol = 2.5e-14_dp
+    integer, parameter :: max_gamma_iterations = 10000, max_root_iterations = 200
+    integer, parameter :: n_values(6) = [3, 10, 50, 100, 250, 1000]
+    real(dp), parameter :: rayleigh_mean_factors(6) = [ &
+        1.001075736951740_dp, 1.272734273369137_dp, &
+        1.560113379974762_dp, 1.668233372358517_dp, &
+        1.801017222497626_dp, 1.984835590575388_dp]
 
-    ! Define a portable double precision kind
-    INTEGER, PARAMETER :: dp = SELECTED_REAL_KIND(15, 307)
+    type :: statistic_t
+        integer :: n = 0
+        real(dp) :: threshold = 0.0_dp
+        real(dp) :: rayleigh_threshold = 0.0_dp
+        real(dp) :: mean_unlimited = 0.0_dp
+        real(dp) :: rayleigh_mean = 0.0_dp
+        real(dp) :: mean_final = 0.0_dp
+        real(dp) :: mean_normalized = 0.0_dp
+        logical :: rayleigh_limit_applied = .false.
+    end type
 
-    ! Global parameters for the Composite Weibull distribution.
-    REAL(KIND=dp), PARAMETER :: K1 = 2.0_dp ! Exponent for the first part of the Composite Weibull distribution (Rayleigh-shaped)
-    REAL(KIND=dp), PARAMETER :: K2 = 3.6_dp ! Exponent for the second part of the Composite Weibull distribution
+    type, public :: analysis_t
+        real(dp) :: hm0 = 0.0_dp, depth = 0.0_dp, slope_denominator = 0.0_dp
+        real(dp) :: slope = 0.0_dp, m0 = 0.0_dp, hrms = 0.0_dp
+        real(dp) :: saturation = 0.0_dp, htr = 0.0_dp, transition_normalized = 0.0_dp
+        logical :: uses_cwd = .false., slope_outside_calibration = .false.
+        logical :: saturation_outside_observed_range = .false.
+        real(dp) :: scale1_normalized = 0.0_dp, scale2_normalized = 0.0_dp
+        real(dp) :: transition_exponent = 0.0_dp, transition_exceedance_probability = 0.0_dp
+        real(dp) :: transition_recurrence_count = 0.0_dp
+        real(dp) :: moment_residual = 0.0_dp, continuity_residual = 0.0_dp
+        integer :: solver_iterations = 0
+        type(statistic_t) :: statistics(6)
+    end type
 
-    ! Precision for Numerical Methods.
-    REAL(KIND=dp), PARAMETER :: EPSILON = 1.0E-12_dp     ! Max allowable error for solver convergence.
-    REAL(KIND=dp), PARAMETER :: JACOBIAN_DX = 1.0E-8_dp  ! Step size for finite difference Jacobian.
-    REAL(KIND=dp), PARAMETER :: LOCAL_EPS = 1.0E-16_dp   ! Tolerance for gamma function convergence.
+    type :: report_builder_t
+        character(len=:), allocatable :: content
+        logical :: first = .true.
+    end type
 
-    ! File unit for the report
-    INTEGER, PARAMETER :: REPORT_UNIT = 10
+    public :: calculate, format_report
 
-    ! Derived type to hold all results for cleaner data management.
-    TYPE :: wave_results_t
-        REAL(KIND=dp) :: Hm0 = 0.0_dp
-        REAL(KIND=dp) :: d = 0.0_dp
-        REAL(KIND=dp) :: slopeM = 0.0_dp
-        CHARACTER(LEN=10) :: distribution_type = ''
-        REAL(KIND=dp) :: Hrms = 0.0_dp
-        REAL(KIND=dp) :: m0 = 0.0_dp
-        REAL(KIND=dp) :: tanAlpha = 0.0_dp
-        REAL(KIND=dp) :: Htr_dim = 0.0_dp
-        REAL(KIND=dp) :: Htr_tilde = 0.0_dp
-        REAL(KIND=dp) :: H1_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H2_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H1_3_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H1_10_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H1_50_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H1_100_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H1_250_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H1_1000_Hrms = 0.0_dp
-        REAL(KIND=dp) :: H1_dim = 0.0_dp
-        REAL(KIND=dp) :: H2_dim = 0.0_dp
-        REAL(KIND=dp) :: H1_3_dim = 0.0_dp
-        REAL(KIND=dp) :: H1_10_dim = 0.0_dp
-        REAL(KIND=dp) :: H1_50_dim = 0.0_dp
-        REAL(KIND=dp) :: H1_100_dim = 0.0_dp
-        REAL(KIND=dp) :: H1_250_dim = 0.0_dp
-        REAL(KIND=dp) :: H1_1000_dim = 0.0_dp
-        REAL(KIND=dp) :: ratio_1_10_div_1_3 = 0.0_dp
-        REAL(KIND=dp) :: ratio_1_50_div_1_3 = 0.0_dp
-        REAL(KIND=dp) :: ratio_1_100_div_1_3 = 0.0_dp
-        REAL(KIND=dp) :: ratio_1_250_div_1_3 = 0.0_dp
-        REAL(KIND=dp) :: ratio_1_1000_div_1_3 = 0.0_dp
-    END TYPE wave_results_t
+contains
+    subroutine fail(message)
+        use iso_fortran_env, only: error_unit
+        character(len=*), intent(in) :: message
+        write(error_unit, '(a)') 'Error: '//message
+        stop 1
+    end subroutine
 
-    REAL(KIND=dp) :: Hm0_in, d_in, slopeM_in
-    TYPE(wave_results_t) :: results
-    LOGICAL :: success
+    subroutine require_positive(value, name)
+        real(dp), intent(in) :: value
+        character(len=*), intent(in) :: name
+        if (.not. ieee_is_finite(value)) call fail(name//' must be finite and positive.')
+        if (value <= 0.0_dp) call fail(name//' must be finite and positive.')
+    end subroutine
 
-    CALL get_user_input(Hm0_in, d_in, slopeM_in)
-
-    results%Hm0 = Hm0_in
-    results%d = d_in
-    results%slopeM = slopeM_in
-
-    ! Perform calculations
-    success = perform_wave_analysis(results)
-
-    ! Check status and generate report
-    IF (success) THEN
-        CALL generate_and_write_report(results)
-    ELSE
-        WRITE(*,*) "ERROR: A calculation failed."
-        OPEN(UNIT=REPORT_UNIT, FILE="report.txt", STATUS="REPLACE", ACTION="WRITE")
-        WRITE(REPORT_UNIT, '(A)') "ERROR: A calculation failed."
-        CLOSE(REPORT_UNIT)
-        ERROR STOP 1
-    END IF
-
-CONTAINS
-
-    ! =======================================================================
-    ! Gamma Functions
-    ! =======================================================================
-
-    FUNCTION incomplete_gamma_lower(a, x) RESULT(res)
-        REAL(KIND=dp), INTENT(IN) :: a, x
-        REAL(KIND=dp) :: res
-        INTEGER, PARAMETER :: MAXIT = 500
-        REAL(KIND=dp) :: gln, ap, sum_val, del_val, b, c, d_val, h, an, del, exp_term
-        INTEGER :: n_iter
-
-        gln = LOG_GAMMA(a)
-
-        IF (x < a + 1.0_dp) THEN
+    subroutine regularized_gamma(a, x, p, q)
+        real(dp), intent(in) :: a, x
+        real(dp), intent(out) :: p, q
+        real(dp), parameter :: fpmin = 1.0e-300_dp, allowance = 2.0e-13_dp
+        real(dp) :: prefactor, ap, delta, sum_value, b, c, d, fraction, an, nd
+        integer :: i
+        logical :: converged
+        if (.not. ieee_is_finite(a) .or. .not. ieee_is_finite(x)) &
+            call fail('Invalid argument in incomplete gamma function.')
+        if (a <= 0.0_dp .or. x < 0.0_dp) call fail('Invalid argument in incomplete gamma function.')
+        if (x <= 0.0_dp) then
+            p = 0.0_dp
+            q = 1.0_dp
+            return
+        end if
+        prefactor = exp(a * log(x) - x - log_gamma(a))
+        converged = .false.
+        if (x < a + 1.0_dp) then
             ap = a
-            sum_val = 1.0_dp / a
-            del_val = sum_val
-            DO n_iter = 1, MAXIT
+            delta = 1.0_dp / a
+            sum_value = delta
+            do i = 1, max_gamma_iterations
                 ap = ap + 1.0_dp
-                del_val = del_val * x / ap
-                sum_val = sum_val + del_val
-                IF (ABS(del_val) < ABS(sum_val) * LOCAL_EPS) THEN
-                    exp_term = EXP(-x + a * LOG(x) - gln)
-                    res = sum_val * exp_term * GAMMA(a)
-                    RETURN
-                END IF
-            END DO
-            res = HUGE(1.0_dp)
-        ELSE
+                delta = delta * x / ap
+                sum_value = sum_value + delta
+                if (.not. ieee_is_finite(sum_value)) call fail('Gamma series became non-finite.')
+                if (abs(delta) <= numerical_tol * abs(sum_value)) then
+                    converged = .true.
+                    exit
+                end if
+            end do
+            if (.not. converged) call fail('Incomplete gamma series did not converge.')
+            p = sum_value * prefactor
+            q = 1.0_dp - p
+        else
             b = x + 1.0_dp - a
-            c = 1.0_dp / TINY(1.0_dp)
-            d_val = 1.0_dp / b
-            h = d_val
-            DO n_iter = 1, MAXIT
-                an = -1.0_dp * REAL(n_iter, KIND=dp) * (REAL(n_iter, KIND=dp) - a)
+            c = 1.0_dp / fpmin
+            d = 1.0_dp / b
+            fraction = d
+            do i = 1, max_gamma_iterations
+                nd = real(i, dp)
+                an = -nd * (nd - a)
                 b = b + 2.0_dp
-                d_val = an * d_val + b
-                IF (ABS(d_val) < TINY(1.0_dp)) d_val = TINY(1.0_dp)
+                d = an * d + b
+                if (abs(d) < fpmin) d = sign(fpmin, d)
                 c = b + an / c
-                IF (ABS(c) < TINY(1.0_dp)) c = TINY(1.0_dp)
-                d_val = 1.0_dp / d_val
-                del = d_val * c
-                h = h * del
-                IF (ABS(del - 1.0_dp) < LOCAL_EPS) EXIT
-            END DO
-            exp_term = EXP(-x + a * LOG(x) - gln)
-            res = (1.0_dp - exp_term * h) * GAMMA(a)
-        END IF
-    END FUNCTION incomplete_gamma_lower
-
-    FUNCTION incomplete_gamma_upper(a, x) RESULT(res)
-        REAL(KIND=dp), INTENT(IN) :: a, x
-        REAL(KIND=dp) :: res
-        res = GAMMA(a) - incomplete_gamma_lower(a, x)
-    END FUNCTION incomplete_gamma_upper
-
-    ! =======================================================================
-    ! Core Wave Model Functions
-    ! =======================================================================
-
-    FUNCTION F1(H1_Hrms_val, H2_Hrms_val, Htr_Hrms_val) RESULT(res)
-        REAL(KIND=dp), INTENT(IN) :: H1_Hrms_val, H2_Hrms_val, Htr_Hrms_val
-        REAL(KIND=dp) :: res, u, v, term1, term2, sum_terms
-        IF (H1_Hrms_val <= 0.0_dp .OR. H2_Hrms_val <= 0.0_dp) THEN
-            res = HUGE(1.0_dp); RETURN
-        END IF
-        u = (Htr_Hrms_val / H1_Hrms_val)**K1
-        v = (Htr_Hrms_val / H2_Hrms_val)**K2
-        term1 = H1_Hrms_val**2 * incomplete_gamma_lower(2.0_dp / K1 + 1.0_dp, u)
-        term2 = H2_Hrms_val**2 * incomplete_gamma_upper(2.0_dp / K2 + 1.0_dp, v)
-        sum_terms = term1 + term2
-        res = SQRT(MAX(0.0_dp, sum_terms)) - 1.0_dp
-    END FUNCTION F1
-
-    FUNCTION F2(H1_Hrms_val, H2_Hrms_val, Htr_Hrms_val) RESULT(res)
-        REAL(KIND=dp), INTENT(IN) :: H1_Hrms_val, H2_Hrms_val, Htr_Hrms_val
-        REAL(KIND=dp) :: res
-        IF (H1_Hrms_val <= 0.0_dp .OR. H2_Hrms_val <= 0.0_dp) THEN
-            res = HUGE(1.0_dp); RETURN
-        END IF
-        res = (Htr_Hrms_val / H1_Hrms_val)**K1 - (Htr_Hrms_val / H2_Hrms_val)**K2
-    END FUNCTION F2
-
-    SUBROUTINE solve_linear_system_2x2(J11, J12, J21, J22, b1, b2, dx1, dx2)
-        REAL(KIND=dp), INTENT(IN) :: J11, J12, J21, J22, b1, b2
-        REAL(KIND=dp), INTENT(OUT) :: dx1, dx2
-        REAL(KIND=dp) :: determinant
-        determinant = J11 * J22 - J12 * J21
-        IF (ABS(determinant) < 1.0E-20_dp) THEN
-            dx1 = 0.0_dp; dx2 = 0.0_dp; RETURN
-        END IF
-        dx1 = (b1 * J22 - b2 * J12) / determinant
-        dx2 = (J11 * b2 - J21 * b1) / determinant
-    END SUBROUTINE solve_linear_system_2x2
-
-    SUBROUTINE get_initial_guesses(Htr_Hrms_val, H1_initial, H2_initial)
-        REAL(KIND=dp), INTENT(IN) :: Htr_Hrms_val
-        REAL(KIND=dp), INTENT(OUT) :: H1_initial, H2_initial
-        H1_initial = tanh(6.739139344110821e+00_dp * Htr_Hrms_val - &
-                     1.265095590917251e-02_dp)**(-6.551633251836707e-01_dp) / &
-                     tanh(sinh(6.947756601426412e-01_dp * Htr_Hrms_val + &
-                     7.908718490781483e-01_dp))**5.484052848550241e+00_dp
-        H2_initial = 1.059259665431797_dp + (0.2059286860468916_dp * Htr_Hrms_val) / &
-                     (1.0_dp + 3.865701948059343_dp * Htr_Hrms_val**(-3.479682433107255_dp))
-        IF (H1_initial <= 0.0_dp) H1_initial = TINY(1.0_dp)
-        IF (H2_initial <= 0.0_dp) H2_initial = TINY(1.0_dp)
-    END SUBROUTINE get_initial_guesses
-
-    FUNCTION newtonRaphsonSystemSolver(Htr_Hrms_val, H1_Hrms_out, H2_Hrms_out, maxit) RESULT(converged)
-        REAL(KIND=dp), INTENT(IN) :: Htr_Hrms_val
-        REAL(KIND=dp), INTENT(INOUT) :: H1_Hrms_out, H2_Hrms_out
-        INTEGER, INTENT(IN) :: maxit
-        LOGICAL :: converged
-        REAL(KIND=dp) :: f1_val, f2_val, J11, J12, J21, J22, dH1, dH2
-        INTEGER :: iter
-
-        CALL get_initial_guesses(Htr_Hrms_val, H1_Hrms_out, H2_Hrms_out)
-
-        DO iter = 0, maxit - 1
-            f1_val = F1(H1_Hrms_out, H2_Hrms_out, Htr_Hrms_val)
-            f2_val = F2(H1_Hrms_out, H2_Hrms_out, Htr_Hrms_val)
-            IF (ABS(f1_val) < EPSILON .AND. ABS(f2_val) < EPSILON) THEN
-                converged = .TRUE.; RETURN
-            END IF
-            J11 = (F1(H1_Hrms_out + JACOBIAN_DX, H2_Hrms_out, Htr_Hrms_val) - &
-                   F1(H1_Hrms_out - JACOBIAN_DX, H2_Hrms_out, Htr_Hrms_val)) / (2.0_dp * JACOBIAN_DX)
-            J12 = (F1(H1_Hrms_out, H2_Hrms_out + JACOBIAN_DX, Htr_Hrms_val) - &
-                   F1(H1_Hrms_out, H2_Hrms_out - JACOBIAN_DX, Htr_Hrms_val)) / (2.0_dp * JACOBIAN_DX)
-            J21 = (F2(H1_Hrms_out + JACOBIAN_DX, H2_Hrms_out, Htr_Hrms_val) - &
-                   F2(H1_Hrms_out - JACOBIAN_DX, H2_Hrms_out, Htr_Hrms_val)) / (2.0_dp * JACOBIAN_DX)
-            J22 = (F2(H1_Hrms_out, H2_Hrms_out + JACOBIAN_DX, Htr_Hrms_val) - &
-                   F2(H1_Hrms_out, H2_Hrms_out - JACOBIAN_DX, Htr_Hrms_val)) / (2.0_dp * JACOBIAN_DX)
-            CALL solve_linear_system_2x2(J11, J12, J21, J22, -f1_val, -f2_val, dH1, dH2)
-            H1_Hrms_out = H1_Hrms_out + dH1
-            H2_Hrms_out = H2_Hrms_out + dH2
-            IF (H1_Hrms_out <= 0.0_dp) H1_Hrms_out = TINY(1.0_dp)
-            IF (H2_Hrms_out <= 0.0_dp) H2_Hrms_out = TINY(1.0_dp)
-        END DO
-        WRITE(*,*) "Newton-Raphson solver failed to converge for Htr_Hrms =", Htr_Hrms_val
-        converged = .FALSE.
-    END FUNCTION newtonRaphsonSystemSolver
-
-    FUNCTION calculate_HN(N, H1, H2, Htr) RESULT(res)
-        REAL(KIND=dp), INTENT(IN) :: N, H1, H2, Htr
-        REAL(KIND=dp) :: res, HN_candidate1
-        HN_candidate1 = H1 * (LOG(N))**(1.0_dp / K1)
-        IF (HN_candidate1 < Htr - EPSILON) THEN
-            res = HN_candidate1
-        ELSE
-            res = H2 * (LOG(N))**(1.0_dp / K2)
-        END IF
-    END FUNCTION calculate_HN
-
-    FUNCTION calculate_H1N(N_val, H1, H2, Htr) RESULT(res)
-        REAL(KIND=dp), INTENT(IN) :: N_val, H1, H2, Htr
-        REAL(KIND=dp) :: res, H_N_val, term1_a, term1_x_ln_Nval, term1_x_HtrH1, &
-                         gamma1, term2_a, term2_x_HtrH2, gamma2
-        H_N_val = calculate_HN(N_val, H1, H2, Htr)
-        term1_x_ln_Nval = LOG(N_val)
-        term2_a = 1.0_dp / K2 + 1.0_dp
-        IF (H_N_val < Htr - EPSILON) THEN
-            term1_a = 1.0_dp / K1 + 1.0_dp
-            term1_x_HtrH1 = (Htr / H1)**K1
-            term2_x_HtrH2 = (Htr / H2)**K2
-            gamma1 = incomplete_gamma_upper(term1_a, term1_x_ln_Nval) - incomplete_gamma_upper(term1_a, term1_x_HtrH1)
-            gamma2 = incomplete_gamma_upper(term2_a, term2_x_HtrH2)
-            res = N_val * (H1 * gamma1 + H2 * gamma2)
-        ELSE
-            res = N_val * H2 * incomplete_gamma_upper(term2_a, term1_x_ln_Nval)
-        END IF
-    END FUNCTION calculate_H1N
-
-    FUNCTION perform_wave_analysis(results) RESULT(success)
-        TYPE(wave_results_t), INTENT(INOUT) :: results
-        LOGICAL :: success
-        REAL(KIND=dp) :: sqrt_m0
-        REAL(KIND=dp) :: H1_3_Hrms_capped, H1_10_Hrms_capped, H1_50_Hrms_capped, &
-                         H1_100_Hrms_capped, H1_250_Hrms_capped, H1_1000_Hrms_capped
-
-        success = .TRUE.
-
-        ! Step 1: Calculate primary parameters
-        results%m0 = (results%Hm0 / 4.0_dp)**2
-        sqrt_m0 = SQRT(results%m0)
-        results%Hrms = (2.69_dp + 3.24_dp * sqrt_m0 / results%d) * sqrt_m0
-        results%tanAlpha = 1.0_dp / results%slopeM
-        results%Htr_dim = (0.35_dp + 5.8_dp * results%tanAlpha) * results%d
-        IF (results%Hrms > 0.0_dp) THEN
-            results%Htr_tilde = results%Htr_dim / results%Hrms
-        ELSE
-            results%Htr_tilde = 0.0_dp
-        END IF
-
-        ! OVERSHOOT-PREVENTION: Method 1 - H_tr Threshold Switch
-        IF (results%Htr_tilde > 2.75_dp) THEN
-            results%distribution_type = "Rayleigh"
-            ! Use theoretically exact H(1/N)/Hm0 ratios for a pure Rayleigh distribution.
-            results%H1_3_dim    = 1.001075736951740_dp * results%Hm0
-            results%H1_10_dim   = 1.272734273369137_dp * results%Hm0
-            results%H1_50_dim   = 1.560113379974762_dp * results%Hm0
-            results%H1_100_dim  = 1.668233372358517_dp * results%Hm0
-            results%H1_250_dim  = 1.801017222497626_dp * results%Hm0
-            results%H1_1000_dim = 1.984835590575388_dp * results%Hm0
-
-            IF (results%Hrms > 0.0_dp) THEN
-                results%H1_3_Hrms = results%H1_3_dim / results%Hrms
-                results%H1_10_Hrms = results%H1_10_dim / results%Hrms
-                results%H1_50_Hrms = results%H1_50_dim / results%Hrms
-                results%H1_100_Hrms = results%H1_100_dim / results%Hrms
-                results%H1_250_Hrms = results%H1_250_dim / results%Hrms
-                results%H1_1000_Hrms = results%H1_1000_dim / results%Hrms
-            END IF
-        ELSE
-            results%distribution_type = "B&G"
-            ! Step 2: Solve for H1/Hrms and H2/Hrms
-            IF (.NOT. newtonRaphsonSystemSolver(results%Htr_tilde, results%H1_Hrms, results%H2_Hrms, 100)) THEN
-                success = .FALSE.; RETURN
-            END IF
-
-            ! Step 3: Calculate H1/N quantiles
-            results%H1_3_Hrms = calculate_H1N(3.0_dp, results%H1_Hrms, results%H2_Hrms, results%Htr_tilde)
-            results%H1_10_Hrms = calculate_H1N(10.0_dp, results%H1_Hrms, results%H2_Hrms, results%Htr_tilde)
-            results%H1_50_Hrms = calculate_H1N(50.0_dp, results%H1_Hrms, results%H2_Hrms, results%Htr_tilde)
-            results%H1_100_Hrms = calculate_H1N(100.0_dp, results%H1_Hrms, results%H2_Hrms, results%Htr_tilde)
-            results%H1_250_Hrms = calculate_H1N(250.0_dp, results%H1_Hrms, results%H2_Hrms, results%Htr_tilde)
-            results%H1_1000_Hrms = calculate_H1N(1000.0_dp, results%H1_Hrms, results%H2_Hrms, results%Htr_tilde)
-
-            ! Step 4: Convert to dimensional values
-            results%H1_dim = results%H1_Hrms * results%Hrms
-            results%H2_dim = results%H2_Hrms * results%Hrms
-            results%H1_3_dim = results%H1_3_Hrms * results%Hrms
-            results%H1_10_dim = results%H1_10_Hrms * results%Hrms
-            results%H1_50_dim = results%H1_50_Hrms * results%Hrms
-            results%H1_100_dim = results%H1_100_Hrms * results%Hrms
-            results%H1_250_dim = results%H1_250_Hrms * results%Hrms
-            results%H1_1000_dim = results%H1_1000_Hrms * results%Hrms
-
-            ! OVERSHOOT-PREVENTION: Method 2 - Capping
-            ! Use theoretically exact H(1/N)/Hm0 ratios for a pure Rayleigh distribution.
-            results%H1_3_dim    = MIN(results%H1_3_dim,    1.001075736951740_dp * results%Hm0)
-            results%H1_10_dim   = MIN(results%H1_10_dim,   1.272734273369137_dp * results%Hm0)
-            results%H1_50_dim   = MIN(results%H1_50_dim,   1.560113379974762_dp * results%Hm0)
-            results%H1_100_dim  = MIN(results%H1_100_dim,  1.668233372358517_dp * results%Hm0)
-            results%H1_250_dim  = MIN(results%H1_250_dim,  1.801017222497626_dp * results%Hm0)
-            results%H1_1000_dim = MIN(results%H1_1000_dim, 1.984835590575388_dp * results%Hm0)
-        END IF
-
-        ! Step 5: Calculate diagnostic ratios (always do this last)
-        IF (results%H1_3_dim > 0.0_dp) THEN
-            H1_3_Hrms_capped = results%H1_3_dim / results%Hrms
-            H1_10_Hrms_capped = results%H1_10_dim / results%Hrms
-            H1_50_Hrms_capped = results%H1_50_dim / results%Hrms
-            H1_100_Hrms_capped = results%H1_100_dim / results%Hrms
-            H1_250_Hrms_capped = results%H1_250_dim / results%Hrms
-            H1_1000_Hrms_capped = results%H1_1000_dim / results%Hrms
-
-            results%ratio_1_10_div_1_3 = H1_10_Hrms_capped / H1_3_Hrms_capped
-            results%ratio_1_50_div_1_3 = H1_50_Hrms_capped / H1_3_Hrms_capped
-            results%ratio_1_100_div_1_3 = H1_100_Hrms_capped / H1_3_Hrms_capped
-            results%ratio_1_250_div_1_3 = H1_250_Hrms_capped / H1_3_Hrms_capped
-            results%ratio_1_1000_div_1_3 = H1_1000_Hrms_capped / H1_3_Hrms_capped
-        ELSE
-            results%ratio_1_10_div_1_3 = 0.0_dp
-            results%ratio_1_50_div_1_3 = 0.0_dp
-            results%ratio_1_100_div_1_3 = 0.0_dp
-            results%ratio_1_250_div_1_3 = 0.0_dp
-            results%ratio_1_1000_div_1_3 = 0.0_dp
-        END IF
-    END FUNCTION perform_wave_analysis
-
-    ! =======================================================================
-    ! I/O and Report Generation
-    ! =======================================================================
-    SUBROUTINE get_user_input(Hm0_out, d_out, slopeM_out)
-        REAL(KIND=dp), INTENT(OUT) :: Hm0_out, d_out, slopeM_out
-        CHARACTER(LEN=256) :: arg_str
-        INTEGER :: arg_count, iostat_val
-
-        arg_count = COMMAND_ARGUMENT_COUNT()
-        IF (arg_count >= 3) THEN
-            CALL GET_COMMAND_ARGUMENT(1, arg_str)
-            READ(arg_str, *, IOSTAT=iostat_val) Hm0_out
-            IF (iostat_val /= 0) THEN
-                WRITE(*,*) "Invalid Hm0 argument."
-                ERROR STOP 2
-            END IF
-            CALL GET_COMMAND_ARGUMENT(2, arg_str)
-            READ(arg_str, *, IOSTAT=iostat_val) d_out
-            IF (iostat_val /= 0) THEN
-                WRITE(*,*) "Invalid d argument."
-                ERROR STOP 3
-            END IF
-            CALL GET_COMMAND_ARGUMENT(3, arg_str)
-            READ(arg_str, *, IOSTAT=iostat_val) slopeM_out
-            IF (iostat_val /= 0) THEN
-                WRITE(*,*) "Invalid slopeM argument."
-                ERROR STOP 4
-            END IF
-        ELSE
-            WRITE(*, '(A)', ADVANCE='NO') "Enter Hm0 (m): "
-            READ(*,*,IOSTAT=iostat_val) Hm0_out
-            IF (iostat_val /= 0) THEN
-                WRITE(*,*) "Input error for Hm0."
-                ERROR STOP 5
-            END IF
-            WRITE(*, '(A)', ADVANCE='NO') "Enter water depth d (m): "
-            READ(*,*,IOSTAT=iostat_val) d_out
-            IF (iostat_val /= 0) THEN
-                WRITE(*,*) "Input error for d."
-                ERROR STOP 6
-            END IF
-            WRITE(*, '(A)', ADVANCE='NO') "Enter beach slope (m): "
-            READ(*,*,IOSTAT=iostat_val) slopeM_out
-            IF (iostat_val /= 0) THEN
-                WRITE(*,*) "Input error for slopeM."
-                ERROR STOP 7
-            END IF
-        END IF
-
-        IF (Hm0_out <= 0.0_dp .OR. d_out <= 0.0_dp .OR. slopeM_out <= 0.0_dp) THEN
-            WRITE(*,*) "ERROR: All inputs must be positive."
-            ERROR STOP 8
-        END IF
-    END SUBROUTINE get_user_input
-
-    SUBROUTINE generate_and_write_report(results)
-        !---------------------------------------------------------------------
-        ! Purpose:
-        !   Builds a detailed report from the results object and writes it
-        !   to "report.txt" and standard output.
-        !---------------------------------------------------------------------
-        TYPE(wave_results_t), INTENT(IN) :: results
-        CHARACTER(LEN=4000) :: report_str ! A large enough string to hold the report
-        CHARACTER(LEN=120) :: temp_line ! Temporary string for building each line
-        CHARACTER(LEN=20)  :: num_str, slopeM_str, tanAlpha_str ! Temporary string for number formatting
-        INTEGER :: iostat_val
-
-        report_str = ''
-
-        ! Build the report string with formatted output using internal write
-        WRITE(temp_line, '(A)') "======================"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "   INPUT PARAMETERS"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "======================"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%Hm0
-        WRITE(temp_line, '(A, A)') "Hm0 (m)         : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%d
-        WRITE(temp_line, '(A, A)') "d (m)           : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(slopeM_str, '(F20.4)') results%slopeM
-        WRITE(tanAlpha_str, '(F20.4)') results%tanAlpha
-        temp_line = "Beach slope (m) : " // TRIM(ADJUSTL(slopeM_str)) &
-                  // "   (tan(alpha) = " // TRIM(ADJUSTL(tanAlpha_str)) // ")"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        report_str = TRIM(report_str) // NEW_LINE('A') ! Blank line
-
-        WRITE(temp_line, '(A, A)') "Distribution Used : ", TRIM(results%distribution_type)
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        report_str = TRIM(report_str) // NEW_LINE('A') ! Blank line
-
-        ! Section: CALCULATED PARAMETERS
-        WRITE(temp_line, '(A)') "==========================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "   CALCULATED PARAMETERS"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "==========================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%m0
-        WRITE(temp_line, '(A, A)') "Free-surface variance m0 (m^2)   : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%Hrms
-        WRITE(temp_line, '(A, A)') "Mean square wave height Hrms (m) : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%Htr_dim
-        WRITE(temp_line, '(A, A)') "Transitional wave height Htr (m) : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%Htr_tilde
-        WRITE(temp_line, '(A, A)') "Dimensionless H~_tr (Htr/Hrms)   : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        report_str = TRIM(report_str) // NEW_LINE('A') ! Blank line
-
-        ! Section: DIMENSIONLESS WAVE HEIGHTS (H/Hrms)
-        WRITE(temp_line, '(A)') "========================================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "   DIMENSIONLESS WAVE HEIGHTS (H/Hrms)"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "========================================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_Hrms
-        WRITE(temp_line, '(A, A)') "H1/Hrms       : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H2_Hrms
-        WRITE(temp_line, '(A, A)') "H2/Hrms       : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_3_Hrms
-        WRITE(temp_line, '(A, A)') "H1/3 / Hrms   : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_10_Hrms
-        WRITE(temp_line, '(A, A)') "H1/10 / Hrms  : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_50_Hrms
-        WRITE(temp_line, '(A, A)') "H1/50 / Hrms  : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_100_Hrms
-        WRITE(temp_line, '(A, A)') "H1/100 / Hrms : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_250_Hrms
-        WRITE(temp_line, '(A, A)') "H1/250 / Hrms : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_1000_Hrms
-        WRITE(temp_line, '(A, A)') "H1/1000 /Hrms : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        report_str = TRIM(report_str) // NEW_LINE('A') ! Blank line
-
-        ! Section: DIMENSIONAL WAVE HEIGHTS (m)
-        WRITE(temp_line, '(A)') "=================================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "   DIMENSIONAL WAVE HEIGHTS (m)"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "=================================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_dim
-        WRITE(temp_line, '(A, A)') "H1 (m)        : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H2_dim
-        WRITE(temp_line, '(A, A)') "H2 (m)        : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_3_dim
-        WRITE(temp_line, '(A, A)') "H1/3 (m)      : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_10_dim
-        WRITE(temp_line, '(A, A)') "H1/10 (m)     : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_50_dim
-        WRITE(temp_line, '(A, A)') "H1/50 (m)     : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_100_dim
-        WRITE(temp_line, '(A, A)') "H1/100 (m)    : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_250_dim
-        WRITE(temp_line, '(A, A)') "H1/250 (m)    : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%H1_1000_dim
-        WRITE(temp_line, '(A, A)') "H1/1000 (m)   : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        report_str = TRIM(report_str) // NEW_LINE('A') ! Blank line
-
-        ! Section: DIAGNOSTIC RATIOS
-        WRITE(temp_line, '(A)') "======================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "   DIAGNOSTIC RATIOS"
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-        WRITE(temp_line, '(A)') "======================="
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%ratio_1_10_div_1_3
-        WRITE(temp_line, '(A, A)') "(H1/10)/(H1/3)   : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%ratio_1_50_div_1_3
-        WRITE(temp_line, '(A, A)') "(H1/50)/(H1/3)   : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%ratio_1_100_div_1_3
-        WRITE(temp_line, '(A, A)') "(H1/100)/(H1/3)  : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%ratio_1_250_div_1_3
-        WRITE(temp_line, '(A, A)') "(H1/250)/(H1/3)  : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A')
-
-        WRITE(num_str, '(F20.4)') results%ratio_1_1000_div_1_3
-        WRITE(temp_line, '(A, A)') "(H1/1000)/(H1/3) : ", TRIM(ADJUSTL(num_str))
-        report_str = TRIM(report_str) // TRIM(temp_line) // NEW_LINE('A') // NEW_LINE('A')
-
-        WRITE(temp_line, '(A)') "End of Report"
-        report_str = TRIM(report_str) // TRIM(temp_line)
-
-        ! Write to file
-        OPEN(UNIT=REPORT_UNIT, FILE="report.txt", STATUS="REPLACE", ACTION="WRITE", IOSTAT=iostat_val)
-        IF (iostat_val /= 0) THEN
-            WRITE(*,*) "Error: Could not open report.txt for writing."
-        ELSE
-            WRITE(REPORT_UNIT, '(A)') TRIM(report_str)
-            CLOSE(REPORT_UNIT)
-        END IF
-
-        ! Write to standard output
-        WRITE(*, '(A)') TRIM(report_str)
-
-    END SUBROUTINE generate_and_write_report
-
-END PROGRAM ShallowWaterWaves
+                if (abs(c) < fpmin) c = sign(fpmin, c)
+                d = 1.0_dp / d
+                delta = c * d
+                fraction = fraction * delta
+                if (.not. ieee_is_finite(fraction)) call fail('Gamma continued fraction became non-finite.')
+                if (abs(delta - 1.0_dp) <= numerical_tol) then
+                    converged = .true.
+                    exit
+                end if
+            end do
+            if (.not. converged) call fail('Incomplete gamma continued fraction did not converge.')
+            q = fraction * prefactor
+            p = 1.0_dp - q
+        end if
+        if (.not. ieee_is_finite(p) .or. .not. ieee_is_finite(q)) &
+            call fail('Incomplete gamma result outside the probability range.')
+        if (p < -allowance .or. p > 1.0_dp + allowance .or. &
+            q < -allowance .or. q > 1.0_dp + allowance) &
+            call fail('Incomplete gamma result outside the probability range.')
+        p = max(0.0_dp, min(1.0_dp, p))
+        q = max(0.0_dp, min(1.0_dp, q))
+    end subroutine
+
+    function gamma_lower(a, x) result(value)
+        real(dp), intent(in) :: a, x
+        real(dp) :: value, p, q
+        call regularized_gamma(a, x, p, q)
+        value = gamma(a) * p
+    end function
+
+    function gamma_upper(a, x) result(value)
+        real(dp), intent(in) :: a, x
+        real(dp) :: value, p, q
+        call regularized_gamma(a, x, p, q)
+        value = gamma(a) * q
+    end function
+
+    function gamma_interval(a, lower_bound, upper_bound) result(value)
+        real(dp), intent(in) :: a, lower_bound, upper_bound
+        real(dp) :: value, middle, half_width, displacement, u1, u2
+        real(dp), parameter :: abscissae(8) = [ &
+            0.09501250983763744_dp, 0.28160355077925891_dp, &
+            0.45801677765722739_dp, 0.61787624440264375_dp, &
+            0.75540440835500303_dp, 0.86563120238783174_dp, &
+            0.94457502307323258_dp, 0.98940093499164993_dp ]
+        real(dp), parameter :: weights(8) = [ &
+            0.18945061045506850_dp, 0.18260341504492359_dp, &
+            0.16915651939500254_dp, 0.14959598881657673_dp, &
+            0.12462897125553387_dp, 0.09515851168249278_dp, &
+            0.06225352393864789_dp, 0.02715245941175409_dp ]
+        integer :: i
+        if (.not. ieee_is_finite(a) .or. .not. ieee_is_finite(lower_bound) .or. &
+            .not. ieee_is_finite(upper_bound)) call fail('Invalid incomplete gamma integration interval.')
+        if (a <= 0.0_dp .or. lower_bound < 0.0_dp .or. upper_bound < lower_bound) &
+            call fail('Invalid incomplete gamma integration interval.')
+        if (upper_bound <= lower_bound) then
+            value = 0.0_dp
+            return
+        end if
+        middle = lower_bound + 0.5_dp * (upper_bound - lower_bound)
+        half_width = 0.5_dp * (upper_bound - lower_bound)
+        value = 0.0_dp
+        do i = 1, 8
+            displacement = half_width * abscissae(i)
+            u1 = middle - displacement
+            u2 = middle + displacement
+            value = value + weights(i) * &
+                (u1**(a - 1.0_dp) * exp(-u1) + u2**(a - 1.0_dp) * exp(-u2))
+        end do
+        value = value * half_width
+        call require_positive(value, 'Gamma interval integral')
+    end function
+
+    function logarithmic_moment_residual(log_q, log_t) result(residual)
+        real(dp), intent(in) :: log_q, log_t
+        real(dp) :: residual, q, lower, upper, kernel
+        q = exp(log_q)
+        lower = exp(-(2.0_dp/k1) * log_q) * gamma_lower(1.0_dp + 2.0_dp/k1, q)
+        upper = exp(-(2.0_dp/k2) * log_q) * gamma_upper(1.0_dp + 2.0_dp/k2, q)
+        kernel = lower + upper
+        call require_positive(kernel, 'Second-moment kernel')
+        residual = 2.0_dp * log_t + log(kernel)
+    end function
+
+    function solve_transition_exponent(t, iterations) result(q)
+        real(dp), intent(in) :: t
+        integer, intent(out) :: iterations
+        real(dp) :: q, log_t, a, b, c, fa, fb, fc, step, prev_step
+        real(dp) :: tolerance, middle, s, p, denom, q_ratio, r_ratio, bound1, bound2
+        integer :: iter
+        call require_positive(t, 'Normalized transition height')
+        log_t = log(t)
+        a = -700.0_dp
+        b = log(64.0_dp)
+        fa = logarithmic_moment_residual(a, log_t)
+        fb = logarithmic_moment_residual(b, log_t)
+        if (.not. ieee_is_finite(fa) .or. .not. ieee_is_finite(fb)) &
+            call fail('CWD scalar solution is outside the representable range.')
+        if (fa <= 0.0_dp .or. fb >= 0.0_dp) &
+            call fail('CWD scalar solution is outside the representable range.')
+        c = a
+        fc = fa
+        step = b-a
+        prev_step = step
+        do iter = 1, max_root_iterations
+            if ((fb > 0.0_dp .and. fc > 0.0_dp) .or. &
+                (fb < 0.0_dp .and. fc < 0.0_dp)) then
+                c = a
+                fc = fa
+                step = b-a
+                prev_step = step
+            end if
+            if (abs(fc) < abs(fb)) then
+                a = b
+                b = c
+                c = a
+                fa = fb
+                fb = fc
+                fc = fa
+            end if
+            tolerance = 2.0_dp * epsilon(1.0_dp) * abs(b) + 2.0e-14_dp
+            middle = 0.5_dp * (c-b)
+            if (abs(middle) <= tolerance .or. abs(fb) < tiny(1.0_dp)) then
+                iterations = iter
+                q = exp(b)
+                call require_positive(q, 'CWD transition exponent')
+                if (abs(logarithmic_moment_residual(b, log_t)) > 1.0e-10_dp) &
+                    call fail('CWD root residual exceeds tolerance.')
+                return
+            end if
+            if (abs(prev_step) >= tolerance .and. abs(fa) > abs(fb)) then
+                s = fb/fa
+                if (abs(a-c) < tiny(1.0_dp)) then
+                    p = 2.0_dp * middle * s
+                    denom = 1.0_dp - s
+                else
+                    q_ratio = fa/fc
+                    r_ratio = fb/fc
+                    p = s * (2.0_dp * middle * q_ratio * (q_ratio-r_ratio) - &
+                            (b-a) * (r_ratio-1.0_dp))
+                    denom = (q_ratio-1.0_dp) * (r_ratio-1.0_dp) * (s-1.0_dp)
+                end if
+                if (p > 0.0_dp) denom = -denom
+                p = abs(p)
+                bound1 = 3.0_dp * middle * denom - abs(tolerance * denom)
+                bound2 = abs(prev_step * denom)
+                if (abs(denom) > 0.0_dp .and. 2.0_dp * p < min(bound1, bound2)) then
+                    prev_step = step
+                    step = p/denom
+                else
+                    step = middle
+                    prev_step = middle
+                end if
+            else
+                step = middle
+                prev_step = middle
+            end if
+            a = b
+            fa = fb
+            if (abs(step) > tolerance) then
+                b = b + step
+            else
+                b = b + sign(tolerance, middle)
+            end if
+            fb = logarithmic_moment_residual(b, log_t)
+            if (.not. ieee_is_finite(fb)) call fail('Non-finite scalar root residual.')
+        end do
+        call fail('CWD scalar solver did not converge.')
+        q = 0.0_dp
+        iterations = 0
+    end function
+
+    function cwd_second_moment(a1, a2, q) result(value)
+        real(dp), intent(in) :: a1, a2, q
+        real(dp) :: value
+        value = a1*a1*gamma_lower(1.0_dp + 2.0_dp/k1, q) + &
+                a2*a2*gamma_upper(1.0_dp + 2.0_dp/k2, q)
+    end function
+
+    function cwd_threshold_normalized(n, a1, a2, q) result(value)
+        integer, intent(in) :: n
+        real(dp), intent(in) :: a1, a2, q
+        real(dp) :: value, log_n
+        log_n = log(real(n,dp))
+        if (log_n < q) then
+            value = a1 * log_n**(1.0_dp/k1)
+        else
+            value = a2 * log_n**(1.0_dp/k2)
+        end if
+    end function
+
+    function cwd_mean_highest_normalized(n, a1, a2, q) result(value)
+        integer, intent(in) :: n
+        real(dp), intent(in) :: a1, a2, q
+        real(dp) :: value, log_n, tail_moment
+        log_n = log(real(n,dp))
+        if (log_n < q) then
+            tail_moment = a1 * gamma_interval(1.0_dp + 1.0_dp/k1, log_n, q) + &
+                          a2 * gamma_upper(1.0_dp + 1.0_dp/k2, q)
+        else
+            tail_moment = a2 * gamma_upper(1.0_dp + 1.0_dp/k2, log_n)
+        end if
+        value = real(n,dp) * tail_moment
+        call require_positive(value, 'CWD mean-high-wave height')
+    end function
+
+    function calculate(hm0, depth, slope_denominator) result(r)
+        real(dp), intent(in) :: hm0, depth, slope_denominator
+        type(analysis_t) :: r
+        real(dp) :: sigma, t, q, m2, e1, e2, rayleigh_scale, log_n
+        integer :: i
+        call require_positive(hm0, 'Hm0')
+        call require_positive(depth, 'Water depth')
+        call require_positive(slope_denominator, 'Slope denominator M')
+        r%hm0 = hm0
+        r%depth = depth
+        r%slope_denominator = slope_denominator
+        r%slope = 1.0_dp / slope_denominator
+        call require_positive(r%slope, 'Foreshore slope')
+        r%slope_outside_calibration = slope_denominator < 20.0_dp .or. slope_denominator > 250.0_dp
+        sigma = hm0/4.0_dp
+        call require_positive(sigma, 'Spectral standard deviation')
+        r%m0 = sigma*sigma
+        call require_positive(r%m0, 'Spectral variance m0')
+        r%saturation = sigma/depth
+        call require_positive(r%saturation, 'Degree of saturation')
+        r%saturation_outside_observed_range = &
+            r%saturation < 0.025_dp .or. r%saturation > 0.16_dp
+        r%hrms = (2.69_dp + 3.24_dp * r%saturation) * sigma
+        call require_positive(r%hrms, 'Root-mean-square wave height')
+        r%htr = (0.35_dp + 5.8_dp*r%slope) * depth
+        call require_positive(r%htr, 'Transitional wave height')
+        r%transition_normalized = r%htr/r%hrms
+        call require_positive(r%transition_normalized, 'Normalized transition height')
+        r%uses_cwd = r%transition_normalized <= rayleigh_switch
+        q = 0.0_dp
+        if (r%uses_cwd) then
+            t = r%transition_normalized
+            q = solve_transition_exponent(t, r%solver_iterations)
+            r%transition_exponent = q
+            r%scale1_normalized = t * exp(-log(q)/k1)
+            r%scale2_normalized = t * exp(-log(q)/k2)
+            call require_positive(r%scale1_normalized, 'First CWD scale')
+            call require_positive(r%scale2_normalized, 'Second CWD scale')
+            r%transition_exceedance_probability = exp(-q)
+            r%transition_recurrence_count = exp(q)
+            m2 = cwd_second_moment(r%scale1_normalized, r%scale2_normalized, q)
+            r%moment_residual = sqrt(m2) - 1.0_dp
+            e1 = (t/r%scale1_normalized)**k1
+            e2 = (t/r%scale2_normalized)**k2
+            r%continuity_residual = e1-e2
+            if (.not. ieee_is_finite(m2)) call fail('CWD probability constraints were not satisfied.')
+            if (abs(r%moment_residual) > 1.0e-10_dp .or. &
+                abs(r%continuity_residual) > 1.0e-10_dp) &
+                call fail('CWD probability constraints were not satisfied.')
+        end if
+        rayleigh_scale = hm0/sqrt(2.0_dp)
+        call require_positive(rayleigh_scale, 'Rayleigh height scale')
+        do i = 1, size(n_values)
+            r%statistics(i)%n = n_values(i)
+            log_n = log(real(n_values(i),dp))
+            r%statistics(i)%rayleigh_threshold = rayleigh_scale*sqrt(log_n)
+            r%statistics(i)%rayleigh_mean = rayleigh_mean_factors(i)*hm0
+            call require_positive(r%statistics(i)%rayleigh_threshold, 'Rayleigh exceedance threshold')
+            call require_positive(r%statistics(i)%rayleigh_mean, 'Rayleigh high-wave mean')
+            if (r%uses_cwd) then
+                r%statistics(i)%threshold = cwd_threshold_normalized(n_values(i), &
+                    r%scale1_normalized, r%scale2_normalized, q) * r%hrms
+                r%statistics(i)%mean_unlimited = cwd_mean_highest_normalized(n_values(i), &
+                    r%scale1_normalized, r%scale2_normalized, q) * r%hrms
+                call require_positive(r%statistics(i)%threshold, 'CWD exceedance threshold')
+                call require_positive(r%statistics(i)%mean_unlimited, 'CWD high-wave mean')
+                r%statistics(i)%mean_final = min(r%statistics(i)%mean_unlimited, r%statistics(i)%rayleigh_mean)
+                r%statistics(i)%rayleigh_limit_applied = &
+                    r%statistics(i)%mean_unlimited > r%statistics(i)%rayleigh_mean * &
+                    (1.0_dp + 8.0_dp*epsilon(1.0_dp))
+            else
+                r%statistics(i)%threshold = r%statistics(i)%rayleigh_threshold
+                r%statistics(i)%mean_unlimited = r%statistics(i)%rayleigh_mean
+                r%statistics(i)%mean_final = r%statistics(i)%rayleigh_mean
+            end if
+            r%statistics(i)%mean_normalized = r%statistics(i)%mean_final / r%hrms
+            call require_positive(r%statistics(i)%mean_normalized, 'Normalized high-wave mean')
+            if (.not. (r%statistics(i)%mean_unlimited > r%statistics(i)%threshold)) &
+                call fail('Inconsistent wave-height statistics.')
+            if (r%statistics(i)%mean_final > r%statistics(i)%rayleigh_mean*(1.0_dp+1.0e-12_dp)) &
+                call fail('Inconsistent wave-height statistics.')
+            if (i > 1) call verify_statistic_order(r%statistics(max(1,i-1)), r%statistics(i))
+        end do
+    end function
+
+    subroutine verify_statistic_order(previous, current)
+        type(statistic_t), intent(in) :: previous, current
+        if (.not. (current%threshold > previous%threshold) .or. &
+            .not. (current%mean_unlimited > previous%mean_unlimited) .or. &
+            .not. (current%mean_final > previous%mean_final)) &
+            call fail('Wave-height ordering constraint not satisfied.')
+    end subroutine
+
+    function int_string(value) result(s)
+        integer, intent(in) :: value
+        character(len=:), allocatable :: s
+        character(len=24) :: tmp
+        write(tmp,'(i0)') value
+        s = trim(tmp)
+    end function
+
+    function report_number(value, decimals, scientific) result(s)
+        real(dp), intent(in) :: value
+        integer, intent(in), optional :: decimals
+        logical, intent(in), optional :: scientific
+        character(len=:), allocatable :: s
+        character(len=160) :: fmt, buffer
+        integer :: nd, i
+        logical :: as_scientific
+        nd = 6
+        if (present(decimals)) nd = decimals
+        as_scientific = .false.
+        if (present(scientific)) as_scientific = scientific
+        if (as_scientific) then
+            write(fmt,'("(ES160.",i0,"E2)")') nd
+        else
+            write(fmt,'("(F160.",i0,")")') nd
+        end if
+        write(buffer,trim(fmt)) value
+        s = trim(adjustl(buffer))
+        if (as_scientific) then
+            do i=1,len(s)
+                if (s(i:i) == 'E') s(i:i) = 'e'
+            end do
+        end if
+    end function
+
+    function report_slope(value) result(s)
+        real(dp), intent(in) :: value
+        character(len=:), allocatable :: s
+        character(len=:), allocatable :: number
+        integer :: n
+        number = report_number(value,4)
+        if (index(number,'.') > 0) then
+            n = len(number)
+            do while (n > 0)
+                if (number(n:n) /= '0') exit
+                n = n-1
+            end do
+            if (number(n:n) == '.') n = n-1
+            number = number(:n)
+        end if
+        s = '1:'//number
+    end function
+
+    function pad_right(s, width) result(out)
+        character(len=*), intent(in) :: s
+        integer, intent(in) :: width
+        character(len=:), allocatable :: out
+        out = s // repeat(' ', max(0,width-len(s)))
+    end function
+
+    function pad_left(s, width) result(out)
+        character(len=*), intent(in) :: s
+        integer, intent(in) :: width
+        character(len=:), allocatable :: out
+        out = repeat(' ', max(0,width-len(s))) // s
+    end function
+
+    subroutine line_add(builder, line)
+        type(report_builder_t), intent(inout) :: builder
+        character(len=*), intent(in) :: line
+        if (builder%first) then
+            builder%content = line
+            builder%first = .false.
+        else
+            builder%content = builder%content // achar(10) // line
+        end if
+    end subroutine
+
+    subroutine field_add(builder, label, value, right_align)
+        type(report_builder_t), intent(inout) :: builder
+        character(len=*), intent(in) :: label, value
+        logical, intent(in), optional :: right_align
+        logical :: right
+        right = .true.
+        if (present(right_align)) right = right_align
+        if (right) then
+            call line_add(builder, '  '//pad_right(label,42)//' : '//pad_left(value,16))
+        else
+            call line_add(builder, '  '//pad_right(label,42)//' : '//value)
+        end if
+    end subroutine
+
+    subroutine stat_row_add(builder, fraction, threshold, raw_mean, rayleigh_mean, final_mean, lim)
+        type(report_builder_t), intent(inout) :: builder
+        character(len=*), intent(in) :: fraction, threshold, raw_mean, rayleigh_mean, final_mean, lim
+        call line_add(builder, '  '//pad_right(fraction,10)//' '//pad_left(threshold,11)// &
+            ' '//pad_left(raw_mean,12)//' '//pad_left(rayleigh_mean,12)// &
+            ' '//pad_left(final_mean,12)//' '//pad_left(lim,8))
+    end subroutine
+
+    function format_report(r) result(report)
+        type(analysis_t), intent(in) :: r
+        character(len=:), allocatable :: report, ns, lim
+        type(report_builder_t) :: b
+        integer :: i
+        call line_add(b, 'SHALLOW-WATER INDIVIDUAL WAVE-HEIGHT STATISTICS')
+        call line_add(b, repeat('=',72))
+        call line_add(b, '')
+        call line_add(b, 'INPUT PARAMETERS')
+        call field_add(b, 'Spectral significant wave height Hm0 (m)', report_number(r%hm0,4))
+        call field_add(b, 'Still-water depth d (m)', report_number(r%depth,4))
+        call field_add(b, 'Foreshore slope', report_slope(r%slope_denominator))
+        call field_add(b, 'tan(alpha)', report_number(r%slope))
+        call line_add(b, '')
+        call line_add(b, 'LOCAL WAVE PARAMETERS')
+        call field_add(b, 'Spectral variance m0 (m^2)', report_number(r%m0,9,.true.))
+        call field_add(b, 'Individual-wave Hrms (m)', report_number(r%hrms))
+        call field_add(b, 'Degree of saturation sqrt(m0)/d', report_number(r%saturation))
+        call field_add(b, 'Transitional wave height Htr (m)', report_number(r%htr))
+        call field_add(b, 'Normalized transition Htr/Hrms', report_number(r%transition_normalized))
+        if (r%uses_cwd) then
+            call field_add(b, 'Distribution', 'Composite Weibull (B&G)', .false.)
+        else
+            call field_add(b, 'Distribution', 'Rayleigh', .false.)
+        end if
+        call line_add(b, '')
+        call line_add(b, 'DISTRIBUTION PARAMETERS')
+        if (r%uses_cwd) then
+            call field_add(b, 'Normalized first Weibull scale H1/Hrms', report_number(r%scale1_normalized))
+            call field_add(b, 'Normalized second Weibull scale H2/Hrms', report_number(r%scale2_normalized))
+            call field_add(b, 'Dimensional Weibull scale H1 (m)', report_number(r%scale1_normalized*r%hrms))
+            call field_add(b, 'Dimensional Weibull scale H2 (m)', report_number(r%scale2_normalized*r%hrms))
+            call field_add(b, 'Transition exponent q', report_number(r%transition_exponent))
+            call field_add(b, 'Probability P(H > Htr)', report_number(r%transition_exceedance_probability,9))
+            call field_add(b, 'Equivalent transition recurrence Ntr', &
+                report_number(r%transition_recurrence_count)//' waves')
+        else
+            call field_add(b, 'Composite Weibull scales H1 and H2', 'N/A', .false.)
+            call field_add(b, 'Composite Weibull transition exponent', 'N/A', .false.)
+        end if
+        call line_add(b, '')
+        call line_add(b, 'WAVE-HEIGHT STATISTICS (m)')
+        call stat_row_add(b, 'HIGHEST', 'H_N', 'RAW MEAN', 'RAYLEIGH', 'FINAL MEAN', 'LIMIT')
+        call stat_row_add(b, 'FRACTION', 'THRESHOLD', 'H_(1/N)', 'H_(1/N)', 'H_(1/N)', 'APPLIED')
+        call line_add(b, '  '//repeat('-',70))
+        do i=1,6
+            ns = int_string(r%statistics(i)%n)
+            lim = 'NO'
+            if (r%statistics(i)%rayleigh_limit_applied) lim='YES'
+            call stat_row_add(b, '1/'//ns, report_number(r%statistics(i)%threshold,4), &
+                report_number(r%statistics(i)%mean_unlimited,4), &
+                report_number(r%statistics(i)%rayleigh_mean,4), &
+                report_number(r%statistics(i)%mean_final,4), lim)
+        end do
+        call line_add(b, '')
+        call line_add(b, 'FINAL NORMALIZED MEAN-HIGH-WAVE HEIGHTS')
+        do i=1,6
+            ns=int_string(r%statistics(i)%n)
+            call field_add(b, 'H_(1/'//ns//') / Hrms', report_number(r%statistics(i)%mean_normalized,7))
+        end do
+        call line_add(b, '')
+        call line_add(b, 'RATIOS RELATIVE TO THE HIGHEST ONE THIRD')
+        do i=2,6
+            ns=int_string(r%statistics(i)%n)
+            call field_add(b, 'H_(1/'//ns//') / H_(1/3)', &
+                report_number(r%statistics(i)%mean_final/r%statistics(1)%mean_final))
+        end do
+        call line_add(b, '')
+        call line_add(b, 'NUMERICAL DIAGNOSTICS')
+        if (r%uses_cwd) then
+            call field_add(b, 'Scalar root iterations', int_string(r%solver_iterations))
+            call field_add(b, 'Second-moment residual', report_number(r%moment_residual,10,.true.))
+            call field_add(b, 'Continuity exponent residual', report_number(r%continuity_residual,10,.true.))
+        else
+            call field_add(b, 'CWD nonlinear solver', 'N/A', .false.)
+        end if
+        call line_add(b, '')
+        call line_add(b, 'INTERPRETATION')
+        call line_add(b, '  H_N is the height exceeded with probability 1/N.')
+        call line_add(b, '  H_(1/N) is the mean height of the highest 1/N fraction.')
+        call line_add(b, '  Both are individual-wave statistics, not storm maxima.')
+        call line_add(b, '  Mean-high-wave Rayleigh limits are applied separately.')
+        call line_add(b, '  H_N always refers to the selected underlying distribution.')
+        call line_add(b, '  The program uses local wave conditions; it does not propagate waves.')
+        if (r%slope_outside_calibration .or. &
+            (r%uses_cwd .and. r%saturation_outside_observed_range)) then
+            call line_add(b, '')
+            call line_add(b, 'APPLICABILITY NOTICE')
+            if (r%slope_outside_calibration) then
+                call line_add(b, '  Foreshore slope is outside the laboratory slope range')
+                call line_add(b, '  1:20 to 1:250 of the Composite Weibull formulation.')
+                call line_add(b, '  Predictions for an extensive horizontal, constant-depth')
+                call line_add(b, '  seabed require a separate applicability assessment.')
+            end if
+            if (r%uses_cwd .and. r%saturation_outside_observed_range) then
+                call line_add(b, '  The degree of saturation is outside the approximate')
+                call line_add(b, '  interval represented by the original foreshore tests.')
+                call line_add(b, '  Interpretation requires engineering assessment.')
+            end if
+        end if
+        report = b%content
+    end function
+end module shallow_water_wave_statistics
+
+program shallow_water_waves_cli
+    use iso_fortran_env, only: real64, output_unit, error_unit
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    use shallow_water_wave_statistics, only: analysis_t, calculate, format_report
+    implicit none
+    integer, parameter :: dp = real64
+    type(analysis_t) :: result
+    character(len=4096) :: arg, pos(3), output_path
+    character(len=:), allocatable :: report
+    real(dp) :: hm0, depth, slope_m
+    integer :: argc, i, positional_count, ios, unit
+    logical :: write_file, show_help
+    character(len=512) :: iomsg
+
+    argc = command_argument_count()
+    write_file = .true.
+    show_help = .false.
+    output_path = 'report.txt'
+    positional_count = 0
+    i = 1
+    do while (i <= argc)
+        arg = ''
+        call get_command_argument(i, arg, status=ios)
+        if (ios /= 0) call die('Unable to read command-line argument.')
+        select case(trim(arg))
+        case('--help', '-h')
+            show_help = .true.
+        case('--no-file')
+            write_file = .false.
+        case('--output', '-o')
+            i = i+1
+            if (i > argc) call die('Missing path after --output.')
+            call get_command_argument(i, output_path, status=ios)
+            if (ios /= 0) call die('Output path is too long.')
+            if (len_trim(output_path) == 0) call die('Output path must not be empty.')
+        case default
+            if (index(trim(arg), '--') == 1) call die('Unrecognized option: '//trim(arg))
+            positional_count = positional_count+1
+            if (positional_count > 3) call die('Provide exactly three numerical inputs or none.')
+            pos(positional_count) = arg
+        end select
+        i = i+1
+    end do
+
+    if (show_help) then
+        call usage()
+        stop
+    end if
+    if (positional_count /= 0 .and. positional_count /= 3) &
+        call die('Provide exactly three numerical inputs or none.')
+
+    if (positional_count == 3) then
+        hm0 = parse_positive_number(pos(1), 'Hm0')
+        depth = parse_positive_number(pos(2), 'water depth')
+        slope_m = parse_positive_number(pos(3), 'slope denominator')
+    else
+        write(output_unit,'(a)',advance='no') 'Hm0 (m): '
+        hm0 = prompt_value('Hm0')
+        write(output_unit,'(a)',advance='no') 'Water depth d (m): '
+        depth = prompt_value('water depth')
+        write(output_unit,'(a)',advance='no') 'Foreshore slope 1:M, enter M: '
+        slope_m = prompt_value('slope denominator')
+        write(output_unit,'(a)') ''
+    end if
+
+    result = calculate(hm0, depth, slope_m)
+    report = format_report(result)
+    if (write_file) then
+        open(newunit=unit, file=trim(output_path), status='replace', &
+            action='write', access='stream', form='unformatted', iostat=ios, iomsg=iomsg)
+        if (ios /= 0) call die('Cannot open output file: '//trim(output_path))
+        write(unit,iostat=ios,iomsg=iomsg) report
+        if (ios /= 0) call die('Cannot write report completely: '//trim(output_path))
+        close(unit,iostat=ios,iomsg=iomsg)
+        if (ios /= 0) call die('Cannot close output file: '//trim(output_path))
+    end if
+    write(output_unit,'(a)') report
+
+contains
+    subroutine die(message)
+        character(len=*), intent(in) :: message
+        write(error_unit,'(a)') 'Error: '//message
+        stop 1
+    end subroutine
+
+    subroutine usage()
+        write(output_unit,'(a)') &
+            'Usage:', &
+            '  shallow-water-waves_cli_f Hm0 depth slope_M [--output path] [--no-file]', &
+            '  shallow-water-waves_cli_f [--output path] [--no-file]', &
+            '  shallow-water-waves_cli_f --help', &
+            '', &
+            'Hm0       Local spectral significant wave height (m).', &
+            'depth     Local still-water depth (m).', &
+            'slope_M   Positive denominator M of a 1:M foreshore slope.', &
+            '', &
+            'With no numeric arguments, the program prompts for inputs.', &
+            'The report is displayed on the console and saved as report.txt', &
+            'unless --no-file is specified. --output selects another file.'
+    end subroutine
+
+    function prompt_value(name) result(value)
+        character(len=*), intent(in) :: name
+        real(dp) :: value
+        character(len=4096) :: text
+        integer :: stat
+        read(*,'(a)',iostat=stat) text
+        if (stat /= 0) call die('No input available for '//name//'.')
+        value = parse_positive_number(text,name)
+    end function
+
+    function parse_positive_number(raw, name) result(value)
+        character(len=*), intent(in) :: raw, name
+        real(dp) :: value
+        character(len=:), allocatable :: s
+        integer :: j, code, dot_count, digit_count, exponent_digits, exp_pos, local_status
+        s = trim(adjustl(raw))
+        if (len(s) == 0) call die('Invalid numeric value for '//name//'.')
+        do j=1,len(s)
+            if (s(j:j) == ',') s(j:j) = '.'
+        end do
+        exp_pos=0
+        do j=1,len(s)
+            if (s(j:j) == 'e' .or. s(j:j)=='E') then
+                if (exp_pos /= 0) call die('Invalid numeric value for '//name//'.')
+                exp_pos=j
+            end if
+        end do
+        dot_count=0; digit_count=0
+        do j=1,merge(exp_pos-1,len(s),exp_pos>0)
+            if (s(j:j) == '+' .or. s(j:j) == '-') then
+                if (j/=1) call die('Invalid numeric value for '//name//'.')
+            else if (s(j:j) == '.') then
+                dot_count=dot_count+1
+                if (dot_count>1) call die('Invalid numeric value for '//name//'.')
+            else
+                code=iachar(s(j:j))
+                if (code < iachar('0') .or. code>iachar('9')) &
+                    call die('Invalid numeric value for '//name//'.')
+                digit_count=digit_count+1
+            end if
+        end do
+        if (digit_count==0) call die('Invalid numeric value for '//name//'.')
+        if (exp_pos>0) then
+            exponent_digits=0
+            do j=exp_pos+1,len(s)
+                if (s(j:j)=='+' .or. s(j:j)=='-') then
+                    if (j/=exp_pos+1) call die('Invalid numeric value for '//name//'.')
+                else
+                    code=iachar(s(j:j))
+                    if (code<iachar('0') .or. code>iachar('9')) &
+                        call die('Invalid numeric value for '//name//'.')
+                    exponent_digits=exponent_digits+1
+                end if
+            end do
+            if (exponent_digits==0) call die('Invalid numeric value for '//name//'.')
+        end if
+        read(s,*,iostat=local_status) value
+        if (local_status/=0) call die('Invalid numeric value for '//name//'.')
+        if (.not. ieee_is_finite(value)) call die('Invalid numeric value for '//name//'.')
+        if (value <= 0.0_dp) call die('Invalid numeric value for '//name//'.')
+    end function
+end program shallow_water_waves_cli

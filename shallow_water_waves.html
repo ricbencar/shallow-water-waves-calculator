@@ -278,6 +278,14 @@
   .section-head p { margin: 3px 0 0; color: var(--muted); font-size: 0.85rem; }
 
   .table-wrap { overflow-x: auto; }
+  .statistics-table { min-width: 690px; }
+  .statistics-table th, .statistics-table td { padding: 12px 10px; }
+  .statistics-table th { line-height: 1.35; }
+  .limit-yes { color: var(--warning); font-weight: 800; }
+  .notice { padding: 16px 20px; border-color: #8b733c; color: var(--warning); }
+  .notice p { margin: 7px 0 0; font-size: 0.9rem; color: #e4ca92; }
+  .distribution-name { font-size: 1.8rem; }
+
 
   table {
     width: 100%;
@@ -359,8 +367,8 @@
     color: #e7f3ff;
     background: #06101d;
     font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-    font-size: 0.82rem;
-    line-height: 1.52;
+    font-size: 0.95rem;
+    line-height: 1.5;
     tab-size: 4;
     scrollbar-color: #315879 #081522;
   }
@@ -473,461 +481,518 @@
 <script>
 'use strict';
 
+// Local individual-wave statistics on a shallow foreshore.
 const K1 = 2.0;
 const K2 = 3.6;
-const EPSILON = 1e-12;
-const JACOBIAN_DX = 1e-8;
-const LOCAL_EPS = 1e-16;
-const DBL_MIN = 2.2250738585072014e-308;
-const MAX_GAMMA_ITERATIONS = 500;
-
-const RAYLEIGH_RATIOS = Object.freeze({
-  3: 1.001075736951740,
-  10: 1.272734273369137,
-  50: 1.560113379974762,
-  100: 1.668233372358517,
-  250: 1.801017222497626,
-  1000: 1.984835590575388
-});
-
-const LANCZOS_COEFFICIENTS = Object.freeze([
-  0.99999999999980993,
-  676.5203681218851,
-  -1259.1392167224028,
-  771.32342877765313,
-  -176.61502916214059,
-  12.507343278686905,
-  -0.13857109526572012,
-  9.9843695780195716e-6,
-  1.5056327351493116e-7
+const RAYLEIGH_SWITCH = 2.75;
+const NUMERICAL_TOL = 2.5e-14;
+const MAX_GAMMA_ITERATIONS = 10000;
+const MAX_ROOT_ITERATIONS = 200;
+const N_VALUES = Object.freeze([3, 10, 50, 100, 250, 1000]);
+const RAYLEIGH_MEAN_FACTORS = Object.freeze([
+  1.001075736951740,
+  1.272734273369137,
+  1.560113379974762,
+  1.668233372358517,
+  1.801017222497626,
+  1.984835590575388
 ]);
 
+// Lanczos approximation for log Gamma, for browsers without a gamma function.
+const LANCZOS = Object.freeze([
+  0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+  771.32342877765313, -176.61502916214059, 12.507343278686905,
+  -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7
+]);
+
+function requirePositive(value, label) {
+  if (!(Number.isFinite(value) && value > 0)) {
+    throw new Error(`${label} must be finite and positive.`);
+  }
+  return value;
+}
+
 function logGamma(z) {
-  if (!Number.isFinite(z) || z <= 0) return NaN;
+  requirePositive(z, 'Gamma argument');
   if (z < 0.5) {
     return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * z)) - logGamma(1 - z);
   }
-  z -= 1;
-  let x = LANCZOS_COEFFICIENTS[0];
-  for (let i = 1; i < LANCZOS_COEFFICIENTS.length; i += 1) {
-    x += LANCZOS_COEFFICIENTS[i] / (z + i);
+  const u = z - 1;
+  let sum = LANCZOS[0];
+  for (let i = 1; i < LANCZOS.length; i += 1) sum += LANCZOS[i] / (u + i);
+  const t = u + 7.5;
+  return 0.5 * Math.log(2 * Math.PI) + (u + 0.5) * Math.log(t) - t + Math.log(sum);
+}
+
+// Regularized lower and upper incomplete gamma probabilities, P(a,x), Q(a,x).
+function regularizedGamma(a, x) {
+  if (!(Number.isFinite(a) && a > 0 && Number.isFinite(x) && x >= 0)) {
+    throw new Error('Invalid argument in incomplete gamma function.');
   }
-  const t = z + 7.5;
-  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
-}
-
-function gamma(z) {
-  return Math.exp(logGamma(z));
-}
-
-function incompleteGammaLower(a, x) {
-  if (a <= 0.0 || x < 0.0 || !Number.isFinite(a) || !Number.isFinite(x)) return NaN;
-  if (x === 0.0) return 0.0;
-
-  const gln = logGamma(a);
-
-  if (x < a + 1.0) {
+  if (x === 0) return { P: 0, Q: 1 };
+  const prefactor = Math.exp(a * Math.log(x) - x - logGamma(a));
+  let P;
+  let Q;
+  let converged = false;
+  if (x < a + 1) {
     let ap = a;
-    let sum = 1.0 / a;
-    let del = sum;
+    let delta = 1 / a;
+    let sum = delta;
     for (let n = 1; n <= MAX_GAMMA_ITERATIONS; n += 1) {
-      ap += 1.0;
-      del *= x / ap;
-      sum += del;
-      if (Math.abs(del) < Math.abs(sum) * LOCAL_EPS) {
-        return sum * Math.exp(-x + a * Math.log(x) - gln) * gamma(a);
+      ap += 1;
+      delta *= x / ap;
+      sum += delta;
+      if (!Number.isFinite(sum)) throw new Error('Gamma series became non-finite.');
+      if (Math.abs(delta) <= NUMERICAL_TOL * Math.abs(sum)) {
+        converged = true;
+        break;
       }
     }
-    return NaN;
-  }
-
-  let b = x + 1.0 - a;
-  let c = 1.0 / DBL_MIN;
-  let d = 1.0 / b;
-  let h = d;
-
-  for (let i = 1; i <= MAX_GAMMA_ITERATIONS; i += 1) {
-    const an = -1.0 * i * (i - a);
-    b += 2.0;
-    d = an * d + b;
-    if (Math.abs(d) < DBL_MIN) d = DBL_MIN;
-    c = b + an / c;
-    if (Math.abs(c) < DBL_MIN) c = DBL_MIN;
-    d = 1.0 / d;
-    const del = d * c;
-    h *= del;
-    if (Math.abs(del - 1.0) < LOCAL_EPS) break;
-  }
-
-  const pNormalized = 1.0 - Math.exp(-x + a * Math.log(x) - gln) * h;
-  return Math.max(0.0, pNormalized) * gamma(a);
-}
-
-function incompleteGammaUpper(a, x) {
-  if (a <= 0.0 || x < 0.0) {
-    throw new Error('Invalid arguments for incomplete gamma evaluation.');
-  }
-  return gamma(a) - incompleteGammaLower(a, x);
-}
-
-function calculateHN(N, H1, H2, Htr) {
-  if (N <= 1.0 || H1 <= 0.0 || H2 <= 0.0) {
-    throw new Error('Invalid wave-height exceedance arguments.');
-  }
-  const candidate = H1 * Math.pow(Math.log(N), 1.0 / K1);
-  return candidate < Htr - EPSILON
-    ? candidate
-    : H2 * Math.pow(Math.log(N), 1.0 / K2);
-}
-
-function calculateH1N(N, H1, H2, Htr) {
-  if (N <= 1.0 || H1 <= 0.0 || H2 <= 0.0) {
-    throw new Error('Invalid mean-high-wave arguments.');
-  }
-
-  const HN = calculateHN(N, H1, H2, Htr);
-  const lnN = Math.log(N);
-  const upperShape = 1.0 / K2 + 1.0;
-
-  if (HN < Htr - EPSILON) {
-    const lowerShape = 1.0 / K1 + 1.0;
-    const transitionLower = Math.pow(Htr / H1, K1);
-    const transitionUpper = Math.pow(Htr / H2, K2);
-    const gamma1 = incompleteGammaUpper(lowerShape, lnN) - incompleteGammaUpper(lowerShape, transitionLower);
-    const gamma2 = incompleteGammaUpper(upperShape, transitionUpper);
-    return N * (H1 * gamma1 + H2 * gamma2);
-  }
-
-  return N * H2 * incompleteGammaUpper(upperShape, lnN);
-}
-
-function residualF1(H1, H2, Htr) {
-  if (H1 <= 0.0 || H2 <= 0.0) return Number.MAX_VALUE;
-  const arg1 = Math.pow(Htr / H1, K1);
-  const arg2 = Math.pow(Htr / H2, K2);
-  const term1 = H1 * H1 * incompleteGammaLower(2.0 / K1 + 1.0, arg1);
-  const term2 = H2 * H2 * incompleteGammaUpper(2.0 / K2 + 1.0, arg2);
-  return Math.sqrt(Math.max(0.0, term1 + term2)) - 1.0;
-}
-
-function residualF2(H1, H2, Htr) {
-  if (H1 <= 0.0 || H2 <= 0.0) return Number.MAX_VALUE;
-  return Math.pow(Htr / H1, K1) - Math.pow(Htr / H2, K2);
-}
-
-function solveLinearSystem2x2(J11, J12, J21, J22, b1, b2) {
-  const determinant = J11 * J22 - J12 * J21;
-  if (Math.abs(determinant) < 1e-20) return [0.0, 0.0];
-  return [
-    (b1 * J22 - b2 * J12) / determinant,
-    (J11 * b2 - J21 * b1) / determinant
-  ];
-}
-
-function initialGuesses(Htr) {
-  let H1 = Math.pow(Math.tanh(6.739139344110821 * Htr - 0.01265095590917251), -0.6551633251836707)
-    / Math.pow(Math.tanh(Math.sinh(0.6947756601426412 * Htr + 0.7908718490781483)), 5.484052848550241);
-  let H2 = 1.059259665431797
-    + (0.2059286860468916 * Htr)
-    / (1.0 + 3.865701948059343 * Math.pow(Htr, -3.479682433107255));
-
-  if (H1 <= 0.0) H1 = LOCAL_EPS;
-  if (H2 <= 0.0) H2 = LOCAL_EPS;
-  return [H1, H2];
-}
-
-function solveScaleParameters(Htr, maxIterations = 100) {
-  let [H1, H2] = initialGuesses(Htr);
-
-  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
-    const f1 = residualF1(H1, H2, Htr);
-    const f2 = residualF2(H1, H2, Htr);
-
-    if (Math.abs(f1) < EPSILON && Math.abs(f2) < EPSILON) {
-      return { converged: true, H1, H2, iterations: iteration };
-    }
-
-    const J11 = (residualF1(H1 + JACOBIAN_DX, H2, Htr) - residualF1(H1 - JACOBIAN_DX, H2, Htr)) / (2.0 * JACOBIAN_DX);
-    const J12 = (residualF1(H1, H2 + JACOBIAN_DX, Htr) - residualF1(H1, H2 - JACOBIAN_DX, Htr)) / (2.0 * JACOBIAN_DX);
-    const J21 = (residualF2(H1 + JACOBIAN_DX, H2, Htr) - residualF2(H1 - JACOBIAN_DX, H2, Htr)) / (2.0 * JACOBIAN_DX);
-    const J22 = (residualF2(H1, H2 + JACOBIAN_DX, Htr) - residualF2(H1, H2 - JACOBIAN_DX, Htr)) / (2.0 * JACOBIAN_DX);
-
-    const [dH1, dH2] = solveLinearSystem2x2(J11, J12, J21, J22, -f1, -f2);
-    H1 += dH1;
-    H2 += dH2;
-
-    if (H1 <= 0.0) H1 = LOCAL_EPS;
-    if (H2 <= 0.0) H2 = LOCAL_EPS;
-  }
-
-  return { converged: false, H1, H2, iterations: maxIterations };
-}
-
-function blankResults(Hm0, d, slopeM) {
-  return {
-    Hm0, d, slopeM,
-    distribution_type: '',
-    Hrms: 0, m0: 0, tanAlpha: 0, Htr_dim: 0, Htr_tilde: 0,
-    H1_Hrms: 0, H2_Hrms: 0,
-    H1_3_Hrms: 0, H1_10_Hrms: 0, H1_50_Hrms: 0,
-    H1_100_Hrms: 0, H1_250_Hrms: 0, H1_1000_Hrms: 0,
-    H1_dim: 0, H2_dim: 0,
-    H1_3_dim: 0, H1_10_dim: 0, H1_50_dim: 0,
-    H1_100_dim: 0, H1_250_dim: 0, H1_1000_dim: 0,
-    ratio_1_10_div_1_3: 0, ratio_1_50_div_1_3: 0,
-    ratio_1_100_div_1_3: 0, ratio_1_250_div_1_3: 0,
-    ratio_1_1000_div_1_3: 0,
-    solver_iterations: 0
-  };
-}
-
-function performWaveAnalysis(Hm0, d, slopeM) {
-  if (![Hm0, d, slopeM].every(Number.isFinite) || Hm0 <= 0.0 || d <= 0.0 || slopeM <= 0.0) {
-    throw new Error('All input values must be finite and positive.');
-  }
-
-  const r = blankResults(Hm0, d, slopeM);
-  r.m0 = Math.pow(r.Hm0 / 4.0, 2.0);
-  const sqrtM0 = Math.sqrt(r.m0);
-  r.Hrms = (2.69 + 3.24 * sqrtM0 / r.d) * sqrtM0;
-  r.tanAlpha = 1.0 / r.slopeM;
-  r.Htr_dim = (0.35 + 5.8 * r.tanAlpha) * r.d;
-  r.Htr_tilde = r.Hrms > 0.0 ? r.Htr_dim / r.Hrms : 0.0;
-
-  if (r.Htr_tilde > 2.75) {
-    r.distribution_type = 'Rayleigh';
-    r.H1_3_dim = RAYLEIGH_RATIOS[3] * r.Hm0;
-    r.H1_10_dim = RAYLEIGH_RATIOS[10] * r.Hm0;
-    r.H1_50_dim = RAYLEIGH_RATIOS[50] * r.Hm0;
-    r.H1_100_dim = RAYLEIGH_RATIOS[100] * r.Hm0;
-    r.H1_250_dim = RAYLEIGH_RATIOS[250] * r.Hm0;
-    r.H1_1000_dim = RAYLEIGH_RATIOS[1000] * r.Hm0;
-
-    if (r.Hrms > 0.0) {
-      r.H1_3_Hrms = r.H1_3_dim / r.Hrms;
-      r.H1_10_Hrms = r.H1_10_dim / r.Hrms;
-      r.H1_50_Hrms = r.H1_50_dim / r.Hrms;
-      r.H1_100_Hrms = r.H1_100_dim / r.Hrms;
-      r.H1_250_Hrms = r.H1_250_dim / r.Hrms;
-      r.H1_1000_Hrms = r.H1_1000_dim / r.Hrms;
-    }
+    if (!converged) throw new Error('Incomplete gamma series did not converge.');
+    P = sum * prefactor;
+    Q = 1 - P;
   } else {
-    r.distribution_type = 'B&G';
-    const solved = solveScaleParameters(r.Htr_tilde, 100);
-    if (!solved.converged) throw new Error('Nonlinear solver failed to converge.');
+    const FPMIN = 1e-300;
+    let b = x + 1 - a;
+    let c = 1 / FPMIN;
+    let d = 1 / b;
+    let fraction = d;
+    for (let n = 1; n <= MAX_GAMMA_ITERATIONS; n += 1) {
+      const an = -n * (n - a);
+      b += 2;
+      d = an * d + b;
+      if (Math.abs(d) < FPMIN) d = d < 0 ? -FPMIN : FPMIN;
+      c = b + an / c;
+      if (Math.abs(c) < FPMIN) c = c < 0 ? -FPMIN : FPMIN;
+      d = 1 / d;
+      const delta = c * d;
+      fraction *= delta;
+      if (!Number.isFinite(fraction)) throw new Error('Gamma continued fraction became non-finite.');
+      if (Math.abs(delta - 1) <= NUMERICAL_TOL) {
+        converged = true;
+        break;
+      }
+    }
+    if (!converged) throw new Error('Incomplete gamma continued fraction did not converge.');
+    Q = fraction * prefactor;
+    P = 1 - Q;
+  }
+  const allowance = 2e-13;
+  if (!(Number.isFinite(P) && Number.isFinite(Q) &&
+        P >= -allowance && P <= 1 + allowance &&
+        Q >= -allowance && Q <= 1 + allowance)) {
+    throw new Error('Incomplete gamma result outside the probability range.');
+  }
+  return { P: Math.max(0, Math.min(1, P)), Q: Math.max(0, Math.min(1, Q)) };
+}
 
-    r.H1_Hrms = solved.H1;
-    r.H2_Hrms = solved.H2;
+function gammaLower(a, x) {
+  return Math.exp(logGamma(a)) * regularizedGamma(a, x).P;
+}
+
+function gammaUpper(a, x) {
+  return Math.exp(logGamma(a)) * regularizedGamma(a, x).Q;
+}
+
+// Finite interval gamma integral: integral_low^high(u^(a-1) exp(-u) du).
+function gammaInterval(a, low, high) {
+  if (!(Number.isFinite(a) && a > 0 && Number.isFinite(low) && low >= 0 &&
+        Number.isFinite(high) && high >= low)) {
+    throw new Error('Invalid incomplete gamma integration interval.');
+  }
+  if (low === high) return 0;
+  const abscissae = [
+    0.09501250983763744, 0.28160355077925891, 0.45801677765722739,
+    0.61787624440264375, 0.75540440835500303, 0.86563120238783174,
+    0.94457502307323258, 0.98940093499164993
+  ];
+  const weights = [
+    0.18945061045506850, 0.18260341504492359, 0.16915651939500254,
+    0.14959598881657673, 0.12462897125553387, 0.09515851168249278,
+    0.06225352393864789, 0.02715245941175409
+  ];
+  const midpoint = low + 0.5 * (high - low);
+  const halfWidth = 0.5 * (high - low);
+  let sum = 0;
+  for (let i = 0; i < abscissae.length; i += 1) {
+    const delta = halfWidth * abscissae[i];
+    const lo = midpoint - delta;
+    const hi = midpoint + delta;
+    sum += weights[i] * (Math.pow(lo, a - 1) * Math.exp(-lo) +
+                         Math.pow(hi, a - 1) * Math.exp(-hi));
+  }
+  return requirePositive(sum * halfWidth, 'Gamma interval integral');
+}
+
+function logarithmicMomentResidual(logQ, logT) {
+  const q = Math.exp(logQ);
+  const lower = Math.exp(-(2 / K1) * logQ) * gammaLower(1 + 2 / K1, q);
+  const upper = Math.exp(-(2 / K2) * logQ) * gammaUpper(1 + 2 / K2, q);
+  return 2 * logT + Math.log(requirePositive(lower + upper, 'Second-moment kernel'));
+}
+
+// Bracketed scalar solution of the moment constraint in z = log(q).
+function solveTransitionExponent(t) {
+  requirePositive(t, 'Normalized transition height');
+  const logT = Math.log(t);
+  const f = z => logarithmicMomentResidual(z, logT);
+  let a = -700;
+  let b = Math.log(64);
+  let fa = f(a);
+  let fb = f(b);
+  if (!(Number.isFinite(fa) && Number.isFinite(fb) && fa > 0 && fb < 0)) {
+    throw new Error('CWD scalar solution is outside the representable range.');
+  }
+  let c = a;
+  let fc = fa;
+  let step = b - a;
+  let previousStep = step;
+  for (let iteration = 1; iteration <= MAX_ROOT_ITERATIONS; iteration += 1) {
+    if ((fb > 0 && fc > 0) || (fb < 0 && fc < 0)) {
+      c = a; fc = fa; step = b - a; previousStep = step;
+    }
+    if (Math.abs(fc) < Math.abs(fb)) {
+      a = b; b = c; c = a;
+      fa = fb; fb = fc; fc = fa;
+    }
+    const tolerance = 2 * Number.EPSILON * Math.abs(b) + 2e-14;
+    const mid = 0.5 * (c - b);
+    if (Math.abs(mid) <= tolerance || fb === 0) {
+      const q = requirePositive(Math.exp(b), 'CWD transition exponent');
+      if (Math.abs(f(b)) > 1e-10) throw new Error('CWD root residual exceeds tolerance.');
+      return { q, iterations: iteration };
+    }
+    if (Math.abs(previousStep) >= tolerance && Math.abs(fa) > Math.abs(fb)) {
+      const s = fb / fa;
+      let p;
+      let denominator;
+      if (a === c) {
+        p = 2 * mid * s;
+        denominator = 1 - s;
+      } else {
+        const qRatio = fa / fc;
+        const rRatio = fb / fc;
+        p = s * (2 * mid * qRatio * (qRatio - rRatio) - (b - a) * (rRatio - 1));
+        denominator = (qRatio - 1) * (rRatio - 1) * (s - 1);
+      }
+      if (p > 0) denominator = -denominator;
+      p = Math.abs(p);
+      const bound1 = 3 * mid * denominator - Math.abs(tolerance * denominator);
+      const bound2 = Math.abs(previousStep * denominator);
+      if (denominator !== 0 && 2 * p < Math.min(bound1, bound2)) {
+        previousStep = step;
+        step = p / denominator;
+      } else {
+        step = mid;
+        previousStep = mid;
+      }
+    } else {
+      step = mid;
+      previousStep = mid;
+    }
+    a = b;
+    fa = fb;
+    b += Math.abs(step) > tolerance ? step : (mid < 0 ? -tolerance : tolerance);
+    fb = f(b);
+    if (!Number.isFinite(fb)) throw new Error('Non-finite scalar root residual.');
+  }
+  throw new Error('CWD scalar solver did not converge.');
+}
+
+function cwdSecondMoment(a1, a2, q) {
+  return a1 * a1 * gammaLower(1 + 2 / K1, q) +
+         a2 * a2 * gammaUpper(1 + 2 / K2, q);
+}
+
+function cwdThresholdNormalized(N, a1, a2, q) {
+  const lnN = Math.log(N);
+  return lnN < q ? a1 * Math.pow(lnN, 1 / K1) : a2 * Math.pow(lnN, 1 / K2);
+}
+
+function cwdMeanHighestNormalized(N, a1, a2, q) {
+  const lnN = Math.log(N);
+  const tailMoment = lnN < q
+    ? a1 * gammaInterval(1 + 1 / K1, lnN, q) + a2 * gammaUpper(1 + 1 / K2, q)
+    : a2 * gammaUpper(1 + 1 / K2, lnN);
+  return requirePositive(N * tailMoment, 'CWD mean-high-wave height');
+}
+
+function performWaveAnalysis(Hm0, depth, slopeDenominator) {
+  requirePositive(Hm0, 'Hm0');
+  requirePositive(depth, 'Water depth');
+  requirePositive(slopeDenominator, 'Slope denominator M');
+  const slope = requirePositive(1 / slopeDenominator, 'Foreshore slope');
+  const sigma = requirePositive(Hm0 / 4, 'Spectral standard deviation');
+  const m0 = requirePositive(sigma * sigma, 'Spectral variance m0');
+  const saturation = requirePositive(sigma / depth, 'Degree of saturation');
+  const Hrms = requirePositive((2.69 + 3.24 * saturation) * sigma, 'Root-mean-square wave height');
+  const Htr = requirePositive((0.35 + 5.8 * slope) * depth, 'Transitional wave height');
+  const t = requirePositive(Htr / Hrms, 'Normalized transition height');
+  const r = {
+    Hm0, depth, slope_denominator: slopeDenominator, slope, m0, Hrms,
+    saturation, Htr, transition_normalized: t,
+    uses_cwd: t <= RAYLEIGH_SWITCH,
+    slope_outside_calibration: slopeDenominator < 20 || slopeDenominator > 250,
+    saturation_outside_observed_range: saturation < 0.025 || saturation > 0.16,
+    scale1_normalized: NaN, scale2_normalized: NaN, transition_exponent: NaN,
+    transition_exceedance_probability: NaN, transition_recurrence_count: NaN,
+    moment_residual: NaN, continuity_residual: NaN, solver_iterations: 0,
+    statistics: []
+  };
+  if (r.uses_cwd) {
+    const solved = solveTransitionExponent(t);
+    const q = solved.q;
+    r.transition_exponent = q;
     r.solver_iterations = solved.iterations;
-
-    r.H1_3_Hrms = calculateH1N(3.0, r.H1_Hrms, r.H2_Hrms, r.Htr_tilde);
-    r.H1_10_Hrms = calculateH1N(10.0, r.H1_Hrms, r.H2_Hrms, r.Htr_tilde);
-    r.H1_50_Hrms = calculateH1N(50.0, r.H1_Hrms, r.H2_Hrms, r.Htr_tilde);
-    r.H1_100_Hrms = calculateH1N(100.0, r.H1_Hrms, r.H2_Hrms, r.Htr_tilde);
-    r.H1_250_Hrms = calculateH1N(250.0, r.H1_Hrms, r.H2_Hrms, r.Htr_tilde);
-    r.H1_1000_Hrms = calculateH1N(1000.0, r.H1_Hrms, r.H2_Hrms, r.Htr_tilde);
-
-    r.H1_dim = r.H1_Hrms * r.Hrms;
-    r.H2_dim = r.H2_Hrms * r.Hrms;
-    r.H1_3_dim = r.H1_3_Hrms * r.Hrms;
-    r.H1_10_dim = r.H1_10_Hrms * r.Hrms;
-    r.H1_50_dim = r.H1_50_Hrms * r.Hrms;
-    r.H1_100_dim = r.H1_100_Hrms * r.Hrms;
-    r.H1_250_dim = r.H1_250_Hrms * r.Hrms;
-    r.H1_1000_dim = r.H1_1000_Hrms * r.Hrms;
-
-    r.H1_3_dim = Math.min(r.H1_3_dim, RAYLEIGH_RATIOS[3] * r.Hm0);
-    r.H1_10_dim = Math.min(r.H1_10_dim, RAYLEIGH_RATIOS[10] * r.Hm0);
-    r.H1_50_dim = Math.min(r.H1_50_dim, RAYLEIGH_RATIOS[50] * r.Hm0);
-    r.H1_100_dim = Math.min(r.H1_100_dim, RAYLEIGH_RATIOS[100] * r.Hm0);
-    r.H1_250_dim = Math.min(r.H1_250_dim, RAYLEIGH_RATIOS[250] * r.Hm0);
-    r.H1_1000_dim = Math.min(r.H1_1000_dim, RAYLEIGH_RATIOS[1000] * r.Hm0);
+    r.scale1_normalized = requirePositive(t * Math.exp(-Math.log(q) / K1), 'First CWD scale');
+    r.scale2_normalized = requirePositive(t * Math.exp(-Math.log(q) / K2), 'Second CWD scale');
+    r.transition_exceedance_probability = Math.exp(-q);
+    r.transition_recurrence_count = Math.exp(q);
+    const m2 = cwdSecondMoment(r.scale1_normalized, r.scale2_normalized, q);
+    r.moment_residual = Math.sqrt(m2) - 1;
+    r.continuity_residual = Math.pow(t / r.scale1_normalized, K1) -
+                            Math.pow(t / r.scale2_normalized, K2);
+    if (!(Number.isFinite(m2) && Math.abs(r.moment_residual) <= 1e-10 &&
+          Math.abs(r.continuity_residual) <= 1e-10)) {
+      throw new Error('CWD probability constraints were not satisfied.');
+    }
   }
-
-  if (r.H1_3_dim > 0.0) {
-    const H13 = r.H1_3_dim / r.Hrms;
-    const H110 = r.H1_10_dim / r.Hrms;
-    const H150 = r.H1_50_dim / r.Hrms;
-    const H1100 = r.H1_100_dim / r.Hrms;
-    const H1250 = r.H1_250_dim / r.Hrms;
-    const H11000 = r.H1_1000_dim / r.Hrms;
-    r.ratio_1_10_div_1_3 = H110 / H13;
-    r.ratio_1_50_div_1_3 = H150 / H13;
-    r.ratio_1_100_div_1_3 = H1100 / H13;
-    r.ratio_1_250_div_1_3 = H1250 / H13;
-    r.ratio_1_1000_div_1_3 = H11000 / H13;
+  const rayleighScale = requirePositive(Hm0 / Math.sqrt(2), 'Rayleigh height scale');
+  for (let i = 0; i < N_VALUES.length; i += 1) {
+    const N = N_VALUES[i];
+    const rayleigh_threshold = requirePositive(
+      rayleighScale * Math.sqrt(Math.log(N)), 'Rayleigh exceedance threshold');
+    const rayleigh_mean = requirePositive(RAYLEIGH_MEAN_FACTORS[i] * Hm0, 'Rayleigh high-wave mean');
+    let threshold;
+    let mean_unlimited;
+    let mean_final;
+    let rayleigh_limit_applied = false;
+    if (r.uses_cwd) {
+      const a1 = r.scale1_normalized;
+      const a2 = r.scale2_normalized;
+      const q = r.transition_exponent;
+      threshold = requirePositive(cwdThresholdNormalized(N, a1, a2, q) * Hrms,
+                                  'CWD exceedance threshold');
+      mean_unlimited = requirePositive(cwdMeanHighestNormalized(N, a1, a2, q) * Hrms,
+                                      'CWD high-wave mean');
+      mean_final = Math.min(mean_unlimited, rayleigh_mean);
+      rayleigh_limit_applied = mean_unlimited > rayleigh_mean * (1 + 8 * Number.EPSILON);
+    } else {
+      threshold = rayleigh_threshold;
+      mean_unlimited = rayleigh_mean;
+      mean_final = rayleigh_mean;
+    }
+    const mean_normalized = requirePositive(mean_final / Hrms, 'Normalized high-wave mean');
+    if (!(mean_unlimited > threshold && mean_final <= rayleigh_mean * (1 + 1e-12))) {
+      throw new Error('Inconsistent wave-height statistics.');
+    }
+    if (i > 0) {
+      const p = r.statistics[i - 1];
+      if (!(threshold > p.threshold && mean_unlimited > p.mean_unlimited &&
+            mean_final > p.mean_final)) {
+        throw new Error('Wave-height ordering constraint not satisfied.');
+      }
+    }
+    r.statistics.push({
+      N, threshold, rayleigh_threshold, mean_unlimited, rayleigh_mean,
+      mean_final, mean_normalized, rayleigh_limit_applied
+    });
   }
-
-  const finiteResults = Object.entries(r)
-    .filter(([, value]) => typeof value === 'number')
-    .every(([, value]) => Number.isFinite(value));
-  if (!finiteResults) throw new Error('The calculation produced a non-finite result. Check the input range.');
-
   return r;
 }
 
-function fixed(value) {
-  return Number(value).toFixed(4);
+function reportNumber(value, decimals = 6, scientific = false) {
+  if (!Number.isFinite(value)) return 'N/A';
+  if (!scientific) return value.toFixed(decimals);
+  const parts = value.toExponential(decimals).split('e');
+  const exponent = Number(parts[1]);
+  return `${parts[0]}e${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent)).padStart(2, '0')}`;
+}
+
+function reportSlope(denominator) {
+  return `1:${reportNumber(denominator, 4).replace(/\.?0+$/, '')}`;
+}
+
+function reportField(label, value, rightAlign = true) {
+  return `  ${label.padEnd(42)} : ${rightAlign ? value.padStart(16) : value}`;
+}
+
+function reportStatisticRow(fraction, threshold, rawMean, rayleighMean, finalMean, limit) {
+  return `  ${fraction.padEnd(10)} ${threshold.padStart(11)} ${rawMean.padStart(12)} ` +
+         `${rayleighMean.padStart(12)} ${finalMean.padStart(12)} ${limit.padStart(8)}`;
 }
 
 function formatReport(r) {
-  return `======================\n` +
-`   INPUT PARAMETERS\n` +
-`======================\n` +
-`Hm0 (m)         : ${fixed(r.Hm0)}\n` +
-`d (m)           : ${fixed(r.d)}\n` +
-`Beach slope (m) : ${fixed(r.slopeM)}   (tan(alpha) = ${fixed(r.tanAlpha)})\n\n` +
-`Distribution Used : ${r.distribution_type}\n\n` +
-`===========================\n` +
-`   CALCULATED PARAMETERS\n` +
-`===========================\n` +
-`Free-surface variance m0 (m^2)   : ${fixed(r.m0)}\n` +
-`Mean square wave height Hrms (m) : ${fixed(r.Hrms)}\n` +
-`Transitional wave height Htr (m) : ${fixed(r.Htr_dim)}\n` +
-`Dimensionless H~_tr (Htr/Hrms)   : ${fixed(r.Htr_tilde)}\n\n` +
-`=========================================\n` +
-`   DIMENSIONLESS WAVE HEIGHTS (H/Hrms)\n` +
-`=========================================\n` +
-`H1/Hrms       : ${fixed(r.H1_Hrms)}\n` +
-`H2/Hrms       : ${fixed(r.H2_Hrms)}\n` +
-`H1/3 / Hrms   : ${fixed(r.H1_3_Hrms)}\n` +
-`H1/10 / Hrms  : ${fixed(r.H1_10_Hrms)}\n` +
-`H1/50 / Hrms  : ${fixed(r.H1_50_Hrms)}\n` +
-`H1/100 / Hrms : ${fixed(r.H1_100_Hrms)}\n` +
-`H1/250 / Hrms : ${fixed(r.H1_250_Hrms)}\n` +
-`H1/1000 /Hrms : ${fixed(r.H1_1000_Hrms)}\n\n` +
-`==================================\n` +
-`   DIMENSIONAL WAVE HEIGHTS (m)\n` +
-`==================================\n` +
-`H1 (m)        : ${fixed(r.H1_dim)}\n` +
-`H2 (m)        : ${fixed(r.H2_dim)}\n` +
-`H1/3 (m)      : ${fixed(r.H1_3_dim)}\n` +
-`H1/10 (m)     : ${fixed(r.H1_10_dim)}\n` +
-`H1/50 (m)     : ${fixed(r.H1_50_dim)}\n` +
-`H1/100 (m)    : ${fixed(r.H1_100_dim)}\n` +
-`H1/250 (m)    : ${fixed(r.H1_250_dim)}\n` +
-`H1/1000 (m)   : ${fixed(r.H1_1000_dim)}\n\n` +
-`=======================\n` +
-`   DIAGNOSTIC RATIOS\n` +
-`=======================\n` +
-`(H1/10)/(H1/3)   : ${fixed(r.ratio_1_10_div_1_3)}\n` +
-`(H1/50)/(H1/3)   : ${fixed(r.ratio_1_50_div_1_3)}\n` +
-`(H1/100)/(H1/3)  : ${fixed(r.ratio_1_100_div_1_3)}\n` +
-`(H1/250)/(H1/3)  : ${fixed(r.ratio_1_250_div_1_3)}\n` +
-`(H1/1000)/(H1/3) : ${fixed(r.ratio_1_1000_div_1_3)}\n\n` +
-`End of Report\n`;
+  const lines = [
+    'SHALLOW-WATER INDIVIDUAL WAVE-HEIGHT STATISTICS',
+    '='.repeat(72), '', 'INPUT PARAMETERS',
+    reportField('Spectral significant wave height Hm0 (m)', reportNumber(r.Hm0, 4)),
+    reportField('Still-water depth d (m)', reportNumber(r.depth, 4)),
+    reportField('Foreshore slope', reportSlope(r.slope_denominator)),
+    reportField('tan(alpha)', reportNumber(r.slope)),
+    '', 'LOCAL WAVE PARAMETERS',
+    reportField('Spectral variance m0 (m^2)', reportNumber(r.m0, 9, true)),
+    reportField('Individual-wave Hrms (m)', reportNumber(r.Hrms)),
+    reportField('Degree of saturation sqrt(m0)/d', reportNumber(r.saturation)),
+    reportField('Transitional wave height Htr (m)', reportNumber(r.Htr)),
+    reportField('Normalized transition Htr/Hrms', reportNumber(r.transition_normalized)),
+    reportField('Distribution', r.uses_cwd ? 'Composite Weibull (B&G)' : 'Rayleigh', false),
+    '', 'DISTRIBUTION PARAMETERS'
+  ];
+  if (r.uses_cwd) {
+    lines.push(
+      reportField('Normalized first Weibull scale H1/Hrms', reportNumber(r.scale1_normalized)),
+      reportField('Normalized second Weibull scale H2/Hrms', reportNumber(r.scale2_normalized)),
+      reportField('Dimensional Weibull scale H1 (m)', reportNumber(r.scale1_normalized * r.Hrms)),
+      reportField('Dimensional Weibull scale H2 (m)', reportNumber(r.scale2_normalized * r.Hrms)),
+      reportField('Transition exponent q', reportNumber(r.transition_exponent)),
+      reportField('Probability P(H > Htr)', reportNumber(r.transition_exceedance_probability, 9)),
+      reportField('Equivalent transition recurrence Ntr',
+                  reportNumber(r.transition_recurrence_count) + ' waves')
+    );
+  } else {
+    lines.push(reportField('Composite Weibull scales H1 and H2', 'N/A', false),
+               reportField('Composite Weibull transition exponent', 'N/A', false));
+  }
+  lines.push('', 'WAVE-HEIGHT STATISTICS (m)',
+    reportStatisticRow('HIGHEST', 'H_N', 'RAW MEAN', 'RAYLEIGH', 'FINAL MEAN', 'LIMIT'),
+    reportStatisticRow('FRACTION', 'THRESHOLD', 'H_(1/N)', 'H_(1/N)', 'H_(1/N)', 'APPLIED'),
+    '  ' + '-'.repeat(70));
+  for (const s of r.statistics) {
+    lines.push(reportStatisticRow(`1/${s.N}`, reportNumber(s.threshold, 4),
+      reportNumber(s.mean_unlimited, 4), reportNumber(s.rayleigh_mean, 4),
+      reportNumber(s.mean_final, 4), s.rayleigh_limit_applied ? 'YES' : 'NO'));
+  }
+  lines.push('', 'FINAL NORMALIZED MEAN-HIGH-WAVE HEIGHTS');
+  for (const s of r.statistics) {
+    lines.push(reportField(`H_(1/${s.N}) / Hrms`, reportNumber(s.mean_normalized, 7)));
+  }
+  lines.push('', 'RATIOS RELATIVE TO THE HIGHEST ONE THIRD');
+  for (const s of r.statistics.slice(1)) {
+    lines.push(reportField(`H_(1/${s.N}) / H_(1/3)`,
+      reportNumber(s.mean_final / r.statistics[0].mean_final)));
+  }
+  lines.push('', 'NUMERICAL DIAGNOSTICS');
+  if (r.uses_cwd) {
+    lines.push(reportField('Scalar root iterations', String(r.solver_iterations)),
+      reportField('Second-moment residual', reportNumber(r.moment_residual, 10, true)),
+      reportField('Continuity exponent residual', reportNumber(r.continuity_residual, 10, true)));
+  } else {
+    lines.push(reportField('CWD nonlinear solver', 'N/A', false));
+  }
+  lines.push('', 'INTERPRETATION',
+    '  H_N is the height exceeded with probability 1/N.',
+    '  H_(1/N) is the mean height of the highest 1/N fraction.',
+    '  Both are individual-wave statistics, not storm maxima.',
+    '  Mean-high-wave Rayleigh limits are applied separately.',
+    '  H_N always refers to the selected underlying distribution.',
+    '  The program uses local wave conditions; it does not propagate waves.');
+  if (r.slope_outside_calibration || (r.uses_cwd && r.saturation_outside_observed_range)) {
+    lines.push('', 'APPLICABILITY NOTICE');
+    if (r.slope_outside_calibration) {
+      lines.push('  Foreshore slope is outside the laboratory slope range',
+        '  1:20 to 1:250 of the Composite Weibull formulation.',
+        '  Predictions for an extensive horizontal, constant-depth',
+        '  seabed require a separate applicability assessment.');
+    }
+    if (r.uses_cwd && r.saturation_outside_observed_range) {
+      lines.push('  The degree of saturation is outside the approximate',
+        '  interval represented by the original foreshore tests.',
+        '  Interpretation requires engineering assessment.');
+    }
+  }
+  return lines.join('\n');
 }
 
 function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
+  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;');
 }
 
 function parameterRow(name, value, unit = '') {
-  return `<div class="parameter"><span class="parameter-name">${escapeHtml(name)}</span><span class="parameter-value">${escapeHtml(value)}${unit ? ` <span class="unit">${escapeHtml(unit)}</span>` : ''}</span></div>`;
+  return `<div class="parameter"><span class="parameter-name">${escapeHtml(name)}</span>` +
+    `<span class="parameter-value">${escapeHtml(value)}${unit ? ` <span class="unit">${escapeHtml(unit)}</span>` : ''}</span></div>`;
+}
+
+function displayNum(value, digits = 4) {
+  return Number.isFinite(value) ? value.toFixed(digits) : 'N/A';
 }
 
 function renderResults(r, report) {
-  const statistics = [
-    ['H1/3', r.H1_3_Hrms, r.H1_3_dim, '1.0000'],
-    ['H1/10', r.H1_10_Hrms, r.H1_10_dim, r.ratio_1_10_div_1_3],
-    ['H1/50', r.H1_50_Hrms, r.H1_50_dim, r.ratio_1_50_div_1_3],
-    ['H1/100', r.H1_100_Hrms, r.H1_100_dim, r.ratio_1_100_div_1_3],
-    ['H1/250', r.H1_250_Hrms, r.H1_250_dim, r.ratio_1_250_div_1_3],
-    ['H1/1000', r.H1_1000_Hrms, r.H1_1000_dim, r.ratio_1_1000_div_1_3]
-  ];
-
-  const rows = statistics.map(([label, normalized, dimensional, ratio]) => `
-    <tr>
-      <td><strong>${label}</strong></td>
-      <td>${fixed(normalized)}</td>
-      <td class="main-number">${fixed(dimensional)}</td>
-      <td>${typeof ratio === 'string' ? ratio : fixed(ratio)}</td>
-    </tr>`).join('');
-
-  const solverFoot = r.distribution_type === 'B&G'
-    ? `Converged nonlinear solution · ${r.solver_iterations} correction${r.solver_iterations === 1 ? '' : 's'}`
-    : 'Direct deep-water statistics';
-
+  const rows = r.statistics.map(s => `<tr>
+    <td><strong>1/${s.N}</strong></td>
+    <td>${displayNum(s.threshold)}</td>
+    <td>${displayNum(s.mean_unlimited)}</td>
+    <td>${displayNum(s.rayleigh_mean)}</td>
+    <td class="main-number">${displayNum(s.mean_final)}</td>
+    <td>${displayNum(s.mean_normalized, 7)}</td>
+    <td>${s.rayleigh_limit_applied ? '<span class="limit-yes">YES</span>' : 'NO'}</td>
+  </tr>`).join('');
+  const parameters = [
+    parameterRow('Spectral variance, m0', reportNumber(r.m0, 9, true), 'm²'),
+    parameterRow('Foreshore tangent, tan(α)', displayNum(r.slope, 6)),
+    parameterRow('Degree of saturation', displayNum(r.saturation, 6)),
+    parameterRow('Normalized transition, Htr/Hrms', displayNum(r.transition_normalized, 6)),
+    parameterRow('H1 / Hrms', displayNum(r.scale1_normalized, 6)),
+    parameterRow('H2 / Hrms', displayNum(r.scale2_normalized, 6)),
+    parameterRow('H1', displayNum(r.scale1_normalized * r.Hrms, 6), r.uses_cwd ? 'm' : ''),
+    parameterRow('H2', displayNum(r.scale2_normalized * r.Hrms, 6), r.uses_cwd ? 'm' : ''),
+    parameterRow('Transition exponent, q', displayNum(r.transition_exponent, 6)),
+    parameterRow('Probability P(H > Htr)', displayNum(r.transition_exceedance_probability, 9)),
+    parameterRow('Transition recurrence count, Ntr', displayNum(r.transition_recurrence_count, 6)),
+    parameterRow('Scalar root iterations', r.uses_cwd ? String(r.solver_iterations) : 'N/A'),
+    parameterRow('Second-moment residual', r.uses_cwd ? reportNumber(r.moment_residual, 10, true) : 'N/A'),
+    parameterRow('Continuity residual', r.uses_cwd ? reportNumber(r.continuity_residual, 10, true) : 'N/A')
+  ].join('');
+  const ratios = r.statistics.slice(1).map(s => `<tr><td>H_(1/${s.N}) / H_(1/3)</td>` +
+    `<td>${displayNum(s.mean_final / r.statistics[0].mean_final, 6)}</td></tr>`).join('');
+  const notices = [];
+  if (r.slope_outside_calibration) notices.push('The foreshore slope is outside the laboratory slope range 1:20–1:250. A horizontal, constant-depth seabed requires separate assessment.');
+  if (r.uses_cwd && r.saturation_outside_observed_range) notices.push('The degree of saturation is outside the approximate range represented by the original foreshore tests.');
+  const noticeMarkup = notices.length ? `<section class="panel notice" role="note"><strong>Applicability notice</strong><p>${notices.map(escapeHtml).join('</p><p>')}</p></section>` : '';
+  const solverText = r.uses_cwd
+    ? `Scalar solution · ${r.solver_iterations} iteration${r.solver_iterations === 1 ? '' : 's'}`
+    : 'Direct Rayleigh statistics';
   document.getElementById('resultsArea').innerHTML = `
     <div class="summary">
-      <article class="panel metric">
-        <div class="metric-label">Distribution</div>
-        <div class="metric-value">${escapeHtml(r.distribution_type)}</div>
-        <div class="metric-foot">${escapeHtml(solverFoot)}</div>
-      </article>
-      <article class="panel metric">
-        <div class="metric-label">Hrms</div>
-        <div class="metric-value">${fixed(r.Hrms)}<span class="metric-unit">m</span></div>
-        <div class="metric-foot">Root-mean-square wave height</div>
-      </article>
-      <article class="panel metric">
-        <div class="metric-label">Htr</div>
-        <div class="metric-value">${fixed(r.Htr_dim)}<span class="metric-unit">m</span></div>
-        <div class="metric-foot">Htr/Hrms = ${fixed(r.Htr_tilde)}</div>
-      </article>
-      <article class="panel metric">
-        <div class="metric-label">H1/3</div>
-        <div class="metric-value">${fixed(r.H1_3_dim)}<span class="metric-unit">m</span></div>
-        <div class="metric-foot">Mean of highest one-third</div>
-      </article>
+      <article class="panel metric"><div class="metric-label">Distribution</div>
+        <div class="metric-value distribution-name">${r.uses_cwd ? 'B&amp;G' : 'Rayleigh'}</div>
+        <div class="metric-foot">${escapeHtml(solverText)}</div></article>
+      <article class="panel metric"><div class="metric-label">Hrms</div>
+        <div class="metric-value">${displayNum(r.Hrms)}<span class="metric-unit">m</span></div>
+        <div class="metric-foot">Root-mean-square individual wave height</div></article>
+      <article class="panel metric"><div class="metric-label">Htr</div>
+        <div class="metric-value">${displayNum(r.Htr)}<span class="metric-unit">m</span></div>
+        <div class="metric-foot">Htr/Hrms = ${displayNum(r.transition_normalized)}</div></article>
+      <article class="panel metric"><div class="metric-label">H_(1/3)</div>
+        <div class="metric-value">${displayNum(r.statistics[0].mean_final)}<span class="metric-unit">m</span></div>
+        <div class="metric-foot">Mean of the highest one-third</div></article>
     </div>
-
-    <section class="panel section">
-      <div class="section-head">
-        <div>
-          <h2>Characteristic wave heights</h2>
-          <p>Normalized and dimensional mean-high-wave statistics.</p>
-        </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Statistic</th><th>H / Hrms</th><th>Height (m)</th><th>Ratio to H1/3</th></tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel section">
-      <div class="section-head">
-        <div>
-          <h2>Calculated parameters</h2>
-          <p>Distribution scales, transition state, and local input transformations.</p>
-        </div>
-      </div>
-      <div class="parameters">
-        ${parameterRow('Free-surface variance, m0', fixed(r.m0), 'm²')}
-        ${parameterRow('Foreshore tangent, tan(α)', fixed(r.tanAlpha))}
-        ${parameterRow('H1 / Hrms', fixed(r.H1_Hrms))}
-        ${parameterRow('H2 / Hrms', fixed(r.H2_Hrms))}
-        ${parameterRow('H1', fixed(r.H1_dim), 'm')}
-        ${parameterRow('H2', fixed(r.H2_dim), 'm')}
-        ${parameterRow('H1/100', fixed(r.H1_100_dim), 'm')}
-        ${parameterRow('H1/1000', fixed(r.H1_1000_dim), 'm')}
-      </div>
-    </section>
-
-    <details class="panel section">
-      <summary class="section-head">
-        <div>
-          <h2>Detailed calculation report</h2>
-          <p>Complete four-decimal engineering output.</p>
-        </div>
-        <strong>Open</strong>
-      </summary>
+    ${noticeMarkup}
+    <section class="panel section"><div class="section-head"><div>
+      <h2>Characteristic wave heights</h2>
+      <p>Thresholds, highest-fraction means and applicable Rayleigh limits (metres).</p>
+    </div></div><div class="table-wrap"><table class="statistics-table">
+      <thead><tr><th>Highest<br>fraction</th><th>H_N<br>threshold</th>
+        <th>Raw<br>mean</th><th>Rayleigh<br>mean</th><th>Final<br>mean</th>
+        <th>Final<br>H / Hrms</th><th>Limit<br>applied</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></section>
+    <section class="panel section"><div class="section-head"><div>
+      <h2>Distribution parameters and numerical diagnostics</h2>
+      <p>Physical input transformations, Weibull scales and probability constraints.</p>
+    </div></div><div class="parameters">${parameters}</div></section>
+    <section class="panel section"><div class="section-head"><div>
+      <h2>High-wave ratios</h2><p>Ratios use the final mean-high-wave statistics.</p>
+    </div></div><div class="table-wrap"><table><thead><tr><th>Ratio</th><th>Value</th></tr></thead>
+      <tbody>${ratios}</tbody></table></div></section>
+    <details class="panel section"><summary class="section-head"><div>
+      <h2>Detailed calculation report</h2>
+      <p>Plain-text engineering report, aligned with the C++ applications.</p>
+    </div><strong>Open</strong></summary>
       <div class="report-toolbar">
         <button id="copyReportButton" class="secondary small-button" type="button">Copy report</button>
         <button id="downloadReportButton" class="secondary small-button" type="button">Download report.txt</button>
-      </div>
-      <pre id="reportText">${escapeHtml(report)}</pre>
-    </details>`;
-
+      </div><pre id="reportText">${escapeHtml(report)}</pre></details>`;
   document.getElementById('copyReportButton').addEventListener('click', () => copyReport(report));
   document.getElementById('downloadReportButton').addEventListener('click', () => downloadReport(report));
 }
@@ -951,7 +1016,7 @@ function calculateFromInputs() {
     const results = performWaveAnalysis(parseInput('hm0'), parseInput('depth'), parseInput('slope'));
     currentReport = formatReport(results);
     renderResults(results, currentReport);
-    document.getElementById('branchBadge').textContent = results.distribution_type;
+    document.getElementById('branchBadge').textContent = results.uses_cwd ? 'Composite Weibull' : 'Rayleigh';
     document.getElementById('downloadButton').disabled = false;
     setStatus('Calculation completed successfully.', 'ok');
   } catch (error) {
@@ -970,7 +1035,7 @@ function resetCalculator() {
   currentReport = '';
   document.getElementById('branchBadge').textContent = 'Ready';
   document.getElementById('downloadButton').disabled = true;
-  document.getElementById('resultsArea').innerHTML = `<div class="panel placeholder"><strong>Calculation ready</strong>Enter the local wave conditions to generate the complete result set.</div>`;
+  document.getElementById('resultsArea').innerHTML = '<div class="panel placeholder"><strong>Calculation ready</strong>Enter the local wave conditions to generate the complete result set.</div>';
   setStatus('Press Enter or select Calculate.');
   document.getElementById('hm0').focus();
 }
@@ -985,12 +1050,15 @@ function downloadReport(report) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 async function copyReport(report) {
   if (!report) return;
   try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      throw new Error('Clipboard API is not available.');
+    }
     await navigator.clipboard.writeText(report);
     setStatus('Report copied to the clipboard.', 'ok');
   } catch {
@@ -1000,9 +1068,10 @@ async function copyReport(report) {
     textarea.style.opacity = '0';
     document.body.appendChild(textarea);
     textarea.select();
-    document.execCommand('copy');
+    const copied = document.execCommand('copy');
     textarea.remove();
-    setStatus('Report copied to the clipboard.', 'ok');
+    setStatus(copied ? 'Report copied to the clipboard.' : 'Could not copy report. Use the download option.',
+              copied ? 'ok' : 'error');
   }
 }
 
@@ -1010,22 +1079,19 @@ if (typeof document !== 'undefined') {
   document.getElementById('calculateButton').addEventListener('click', calculateFromInputs);
   document.getElementById('resetButton').addEventListener('click', resetCalculator);
   document.getElementById('downloadButton').addEventListener('click', () => downloadReport(currentReport));
-  ['hm0', 'depth', 'slope'].forEach((id) => {
-    document.getElementById(id).addEventListener('keydown', (event) => {
+  ['hm0', 'depth', 'slope'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', event => {
       if (event.key === 'Enter') calculateFromInputs();
     });
   });
-
   calculateFromInputs();
 }
 
+// The numerical functions can also be exercised without the browser interface.
 if (typeof globalThis !== 'undefined') {
   globalThis.ShallowWaterWaves = Object.freeze({
-    performWaveAnalysis,
-    formatReport,
-    incompleteGammaLower,
-    incompleteGammaUpper,
-    solveScaleParameters
+    performWaveAnalysis, formatReport, regularizedGamma,
+    gammaLower, gammaUpper, gammaInterval, solveTransitionExponent
   });
 }
 </script>

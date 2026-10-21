@@ -8,7 +8,7 @@ The project computes characteristic individual-wave statistics from three local 
 - local still-water depth, $d$;
 - foreshore slope written as $1:M$, with $\tan\alpha=1/M$.
 
-The same computational model is provided as a C++ command-line program, a native Windows C++ graphical interface, a Fortran command-line program, a MATLAB function, an interactive Jupyter notebook, and an Android app.
+The project includes a native Windows C++ interface, a portable C++ command-line program, and implementations in Fortran, MATLAB, Jupyter/Python, HTML, and Android. Numerical methods and available diagnostics may differ between implementations.
 
 The implementation includes the deep-water convergence treatment discussed by Caires and Van Gent (2012): the Battjes-Groenendijk result is not permitted to exceed the corresponding Rayleigh value, and the program switches directly to Rayleigh statistics when the normalized transitional wave height is sufficiently large.
 
@@ -23,9 +23,10 @@ The calculator predicts the **local short-term distribution of individual zero-c
 - transitional wave height $H_{tr}$;
 - normalized transition $\widetilde H_{tr}=H_{tr}/H_{rms}$;
 - Composite Weibull scale parameters $H_1$ and $H_2$ when the Battjes-Groenendijk branch is active;
-- means of the highest $1/3$, $1/10$, $1/50$, $1/100$, $1/250$, and $1/1000$ fractions of the individual waves;
-- diagnostic ratios relative to $H_{1/3}$;
-- the selected distribution branch: `B&G` or `Rayleigh`.
+- exceedance thresholds $H_N$ and means of the highest $1/3$, $1/10$, $1/50$, $1/100$, $1/250$, and $1/1000$ fractions;
+- uncapped CWD means, reference Rayleigh means, final means, and cap indicators;
+- normalized means, ratios to $H_{1/3}$, and numerical diagnostics;
+- the selected branch: `Composite Weibull (B&G)` or `Rayleigh`.
 
 The program is a **point model**. It does not propagate a spectrum, solve wave transformation along a profile, calculate wave setup, calculate breaking dissipation, or resolve individual waves in time. The local $H_{m0}$, depth, and slope must already be known from measurements or from an appropriate wave-transformation model.
 
@@ -45,7 +46,7 @@ The program is a **point model**. It does not propagate a spectrum, solve wave t
 | 1998 | Groenendijk's MSc thesis and the WL \| Delft Hydraulics H3351 report developed and validated the Composed Weibull point model. | Established the two-branch distribution, its calibration database, the slope-dependent transition, and the calculation recipe. |
 | 2000 | Battjes and Groenendijk published the Composite Weibull Distribution in *Coastal Engineering*. | Provides the principal scientific model implemented by this repository. |
 | 2012 | Caires and Van Gent examined finite-depth and constant-depth behaviour and clarified deep-water convergence and flat-bottom limitations. | Motivates the Rayleigh switch, Rayleigh caps, and explicit warnings for constant-depth applications. |
-| Present implementation | The same equations are implemented in C++, Fortran, MATLAB, Python/Jupyter, and the Android app. | Provides reproducible cross-language calculations and engineering reporting. |
+| Present implementation | C++ GUI/CLI implement the same governing equations using a bracketed scalar solver. | Provides traceable wave statistics and a consistent engineering report. |
 
 ### From Gaussian surface elevation to individual wave heights
 
@@ -195,7 +196,7 @@ The notation $H_N$ and $H_{1/N}$ must not be confused:
 - $H_N$ is an exceedance threshold;
 - $H_{1/N}$ is the mean of all waves above that threshold.
 
-The software reports $H_{1/3}$, $H_{1/10}$, $H_{1/50}$, $H_{1/100}$, $H_{1/250}$, and $H_{1/1000}$. It does not report a deterministic maximum wave height.
+The Windows C++ program reports both $H_N$ and final $H_{1/N}$ for $N=3,10,50,100,250,1000$. Neither statistic represents a deterministic storm maximum.
 
 ---
 
@@ -297,17 +298,16 @@ $H_{m0}$ is obtained from the spectrum, while $H_{1/3}$ is obtained from an orde
 
 ### Cumulative distribution and density
 
-The Rayleigh cumulative distribution is
+Using the Rayleigh scale $H_{rms,R}=H_{m0}/\sqrt{2}$, the cumulative distribution is
 
 $$
-F_R(H)=1-\exp\left[-\left(H/H_{rms}\right)^2\right]
+F_R(H)=1-\exp\left[-\left(H/H_{rms,R}\right)^2\right]
 $$
 
-
-The probability density is
+The corresponding density is
 
 $$
-f_R(H)=\frac{2H}{H_{rms}^2}\exp\left[-\left(H/H_{rms}\right)^2\right]
+f_R(H)=\frac{2H}{H_{rms,R}^2}\exp\left[-\left(H/H_{rms,R}\right)^2\right]
 $$
 
 
@@ -316,7 +316,7 @@ $$
 The wave height exceeded once, on average, in every $N$ waves is obtained from $P(H>H_N)=1/N$:
 
 $$
-H_N=H_{rms}\sqrt{\ln N}
+H_N=H_{rms,R}\sqrt{\ln N}
 $$
 
 
@@ -325,11 +325,11 @@ $$
 For a Rayleigh distribution, the mean of the highest $1/N$ fraction is
 
 $$
-H_{1/N}=N H_{rms}\Gamma\left(\frac{3}{2},\ln N\right)
+H_{1/N}=N H_{rms,R}\Gamma\left(\frac{3}{2},\ln N\right)
 $$
 
 
-For the narrow-band relation $H_{rms}=\sqrt{8m_0}$ and $H_{m0}=4\sqrt{m_0}$, the exact ratios used by the software are:
+For the narrow-band Rayleigh relation $H_{rms,R}=\sqrt{8m_0}$ and $H_{m0}=4\sqrt{m_0}$, the exact ratios used by the software are:
 
 | Statistic | Rayleigh ratio to $H_{m0}$ |
 |---|---:|
@@ -344,40 +344,31 @@ These constants are used both in the direct Rayleigh branch and as upper caps on
 
 ### Rayleigh moments and scale relations
 
-For the Rayleigh formulation used here,
+For a Rayleigh law of scale $H_{rms,R}$, the general moment is
 
 $$
-F_R(H)=1-\exp\left[-\left(\frac{H}{H_{rms}}\right)^2\right],
+E\left[H^r\right]=H_{rms,R}^{\,r}\Gamma\left(1+\frac r2\right).
 $$
-
-
-the general non-central moment is
-
-$$
-E\left[H^r\right] = H_{rms}^{\,r} \Gamma\left(1+\frac{r}{2}\right).
-$$
-
 
 For $r=2$,
 
 $$
-E\left[H^2\right]=H_{rms}^2,
+E\left[H^2\right]=H_{rms,R}^2.
 $$
 
-
-which confirms that the scale appearing in the selected Rayleigh form is the root-mean-square individual wave height.
+This Rayleigh root-mean-square scale is distinct from the empirical CWD input parameter $H_{rms}$ used for diagnostics in both branches.
 
 Under ideal narrow-band Gaussian theory,
 
 $$
-H_{rms}=\sqrt{8m_0},
+H_{rms,R}=\sqrt{8m_0},
 $$
 
 
 and therefore
 
 $$
-H_{rms}=\frac{H_{m0}}{\sqrt{2}}.
+H_{rms,R}=\frac{H_{m0}}{\sqrt{2}}.
 $$
 
 
@@ -388,42 +379,42 @@ The empirical Battjes-Groenendijk relationship used elsewhere in the calculator 
 The threshold exceeded once in $N$ waves satisfies
 
 $$
-\exp\left[-\left(\frac{H_N}{H_{rms}}\right)^2\right]=\frac{1}{N}.
+\exp\left[-\left(\frac{H_N}{H_{rms,R}}\right)^2\right]=\frac{1}{N}.
 $$
 
 
 Hence,
 
 $$
-\left(\frac{H_N}{H_{rms}}\right)^2=\ln N,
+\left(\frac{H_N}{H_{rms,R}}\right)^2=\ln N,
 $$
 
 
 and
 
 $$
-H_N=H_{rms}\sqrt{\ln N}.
+H_N=H_{rms,R}\sqrt{\ln N}.
 $$
 
 
 Substitution into the conditional-mean integral gives
 
 $$
-H_{1/N} = N\int_{H_N}^{\infty} h\, \frac{2h}{H_{rms}^2} \exp\left[-\left(\frac{h}{H_{rms}}\right)^2\right]dh.
+H_{1/N}=N\int_{H_N}^{\infty}h\,\frac{2h}{H_{rms,R}^2}\exp\left[-\left(\frac{h}{H_{rms,R}}\right)^2\right]dh.
 $$
 
 
 Using the change of variable
 
 $$
-u=\left(\frac{h}{H_{rms}}\right)^2,
+u=\left(\frac{h}{H_{rms,R}}\right)^2,
 $$
 
 
 the result is
 
 $$
-H_{1/N} = N H_{rms} \Gamma\left(\frac{3}{2},\ln N\right).
+H_{1/N}=N H_{rms,R}\Gamma\left(\frac{3}{2},\ln N\right).
 $$
 
 
@@ -510,7 +501,7 @@ H_2 = H_{tr} \left(\frac{H_1}{H_{tr}}\right)^{k_1/k_2}.
 $$
 
 
-The implementation nevertheless solves for both normalized scales simultaneously. This preserves the direct two-equation formulation and provides an explicit continuity residual for convergence checking.
+The C++ implementation eliminates both scales in favour of a common transition exponent $q$. After finding $q$ from the second moment, it recovers both scales and checks continuity.
 
 ### General moment of the Composite Weibull Distribution
 
@@ -610,21 +601,17 @@ $$
 $$
 
 
-The code solves the equivalent residual equation
+The scalar solver enforces $x_1=x_2=q>0$ and imposes the second moment directly. After calculating the scales, the program checks
 
 $$
-F_1=\sqrt{\widetilde H_1^2\gamma\left(1+\frac{2}{k_1},x_1\right)+\widetilde H_2^2\Gamma\left(1+\frac{2}{k_2},x_2\right)}-1=0
+R_m=\sqrt{\widetilde H_1^2\gamma\left(1+\frac{2}{k_1},q\right)+\widetilde H_2^2\Gamma\left(1+\frac{2}{k_2},q\right)}-1,
 $$
 
-
-The continuity residual is
+and the continuity residual
 
 $$
-F_2=x_1-x_2=0
+R_c=\left(\widetilde H_{tr}/\widetilde H_1\right)^{k_1}-\left(\widetilde H_{tr}/\widetilde H_2\right)^{k_2}.
 $$
-
-
-Once $\widetilde H_{tr}$ is known, these two equations determine $\widetilde H_1$ and $\widetilde H_2$.
 
 ---
 
@@ -775,7 +762,7 @@ H_{1/N}=\widetilde H_{1/N}H_{rms}
 $$
 
 
-The implementation evaluates these expressions for $N=3$, $10$, $50$, $100$, $250$, and $1000$.
+The implementation evaluates these expressions for $N=3$, $10$, $50$, $100$, $250$, and $1000$. In the CWD branch, only the final *means* are limited by Rayleigh values; the thresholds remain those of the selected CWD.
 
 ---
 
@@ -861,14 +848,7 @@ $$
 $$
 
 
-The C++ and Fortran implementations evaluate the lower incomplete gamma function using:
-
-- a convergent series for $x<a+1$;
-- a continued fraction for larger $x$;
-- `tgamma` or its language equivalent for the complete gamma function;
-- logarithmic gamma evaluation where useful for numerical stability.
-
-The MATLAB implementation follows the same algorithmic structure. The notebook uses SciPy special functions.
+The C++ solver evaluates incomplete gamma functions using a series for small arguments and a continued fraction for large arguments. It calculates the regularized upper tail directly, avoiding cancellation in rare-wave calculations. Its finite-interval gamma differences are evaluated by Gaussian quadrature. Other language implementations may use different numerical algorithms.
 
 ### Normalized and unnormalized definitions
 
@@ -883,158 +863,103 @@ The governing equations in this repository use the **unnormalized** incomplete g
 
 ### Numerical evaluation strategy
 
-The compiled implementations use a hybrid algorithm:
-
-1. For smaller arguments, a power-series representation is used for the lower incomplete gamma function.
-2. For larger arguments, a continued-fraction representation is used for the upper tail.
-3. The complementary identity
+The C++ implementation evaluates the regularized pair
 
 $$
-\Gamma(a,x)=\Gamma(a)-\gamma(a,x)
+P(a,x)=\gamma(a,x)/\Gamma(a),\qquad Q(a,x)=\Gamma(a,x)/\Gamma(a).
 $$
 
+For $x<a+1$, it evaluates $P$ by a convergent power series; otherwise it evaluates $Q$ by a continued fraction. The code converts these results to unnormalized functions when calculating moments. Both algorithms use an iteration limit of 10,000 and reject non-converged or non-finite results.
 
-connects the two forms.
-4. Iteration stops when the relative increment is below the local tolerance.
-5. Invalid arguments or failure to converge are propagated as calculation errors rather than silently accepted.
+For upper-tail intervals whose endpoints are close, direct subtraction of two nearly equal gamma values is avoided. The C++ code uses a 16-point Gauss–Legendre rule to evaluate
 
-This split avoids the severe cancellation and slow convergence that would occur if one numerical representation were used over the entire argument range.
+$$
+\int_{u_1}^{u_2}u^{a-1}e^{-u}\,du,
+$$
+
+and retains the upper incomplete gamma function for the infinite remainder. This protects the calculation of rare-wave mean heights from cancellation.
 
 ---
 
 ## Nonlinear solution for $\widetilde H_1$ and $\widetilde H_2$
 
-### Newton-Raphson system
+### Scalar reduction of the governing equations
 
-Let
-
-$$
-\mathbf{F}(\mathbf{x})=\begin{bmatrix}F_1(\widetilde H_1,\widetilde H_2)\\F_2(\widetilde H_1,\widetilde H_2)\end{bmatrix}
-$$
-
-
-with
+Let the normalized transition be
 
 $$
-\mathbf{x}=\begin{bmatrix}\widetilde H_1\\\widetilde H_2\end{bmatrix}
+t=\widetilde H_{tr}=H_{tr}/H_{rms}.
 $$
 
-
-At iteration $i$, the Newton correction is obtained from
-
-$$
-\mathbf{J}(\mathbf{x}^{(i)})\Delta\mathbf{x}=-\mathbf{F}(\mathbf{x}^{(i)})
-$$
-
-
-followed by
+By continuity, the two Weibull transition exponents are equal:
 
 $$
-\mathbf{x}^{(i+1)}=\mathbf{x}^{(i)}+\Delta\mathbf{x}
+q=\left(\frac{t}{\widetilde H_1}\right)^{k_1}
+ =\left(\frac{t}{\widetilde H_2}\right)^{k_2}>0.
 $$
 
-
-The Jacobian is approximated by centered finite differences. For example,
+Therefore the normalized scales are reconstructed from a single scalar unknown:
 
 $$
-\frac{\partial F_i}{\partial x_j}\approx\frac{F_i(x_j+\delta)-F_i(x_j-\delta)}{2\delta}
+\widetilde H_1=tq^{-1/k_1},\qquad
+\widetilde H_2=tq^{-1/k_2}.
 $$
 
+Substitution into the second-moment normalization gives
 
-The production constants are:
+$$
+t^2\left[q^{-2/k_1}\gamma\left(1+\frac{2}{k_1},q\right)
++q^{-2/k_2}\Gamma\left(1+\frac{2}{k_2},q\right)\right]=1.
+$$
+
+With $k_1=2$ and $k_2=3.6$ this becomes
+
+$$
+t^2\left[\frac{\gamma(2,q)}q+
+q^{-5/9}\Gamma\left(\frac{14}{9},q\right)\right]=1.
+$$
+
+This is the nonlinear scalar equation solved in the Windows C++ program.
+
+### Bracketed solution in logarithmic coordinates
+
+The code uses $z=\ln q$ so that $q=e^z>0$. It solves the logarithmic residual
+
+$$
+R(z)=2\ln t+\ln\left[
+q^{-2/k_1}\gamma\left(1+\frac{2}{k_1},q\right)
++q^{-2/k_2}\Gamma\left(1+\frac{2}{k_2},q\right)
+\right]=0.
+$$
+
+The scalar residual is solved using a bracketed Brent method, combining bisection and interpolation. The solver checks the initial sign bracket, root convergence and reconstructed scale parameters. Invalid or non-finite states produce an explicit calculation error.
+
+The solver constants are:
 
 | Parameter | Value |
 |---|---:|
-| residual tolerance | $10^{-12}$ |
-| Jacobian increment $\delta$ | $10^{-8}$ |
-| local gamma tolerance | $10^{-16}$ |
-| maximum Newton iterations | 100 |
+| Regularized gamma relative tolerance | $2.5\times10^{-14}$ |
+| Maximum gamma iterations | 10,000 |
+| Maximum scalar iterations | 200 |
+| Final logarithmic root residual | $10^{-10}$ |
+| Moment and continuity acceptance | $10^{-10}$ |
 
-The C++ and Fortran versions solve the $2\times2$ Newton system directly. The MATLAB function implements the same Newton approach. The Jupyter notebook uses `scipy.optimize.fsolve` with the same residual equations and the same empirical starting values.
+### Verification of both CWD constraints
 
-### Explicit $2\times2$ Newton correction
-
-With
-
-$$
-\mathbf J = \begin{bmatrix} J_{11} & J_{12}\\ J_{21} & J_{22} \end{bmatrix}, \qquad \mathbf F = \begin{bmatrix} F_1\\ F_2 \end{bmatrix},
-$$
-
-
-the determinant is
+The scales are calculated as $\widetilde H_i=tq^{-1/k_i}$ and inserted into the original equations. The program independently verifies the second-moment residual
 
 $$
-D=J_{11}J_{22}-J_{12}J_{21}.
+R_m=\sqrt{\widetilde H_1^2\gamma\left(1+\frac{2}{k_1},q\right)
++\widetilde H_2^2\Gamma\left(1+\frac{2}{k_2},q\right)}-1
 $$
 
-
-The correction solving $\mathbf J\Delta\mathbf x=-\mathbf F$ is
-
-$$
-\Delta \widetilde H_1 = \frac{-F_1J_{22}+F_2J_{12}}{D},
-$$
-
+and the continuity residual
 
 $$
-\Delta \widetilde H_2 = \frac{-J_{11}F_2+J_{21}F_1}{D}.
+R_c=\left(t/\widetilde H_1\right)^{k_1}-\left(t/\widetilde H_2\right)^{k_2}.
 $$
 
-
-A nearly singular Jacobian is rejected when $|D|$ is extremely small. After each correction, non-positive scale parameters are replaced by a small positive tolerance before the next residual evaluation.
-
-### Convergence criterion
-
-The nonlinear solution is accepted only when both governing residuals satisfy
-
-$$
-|F_1|<10^{-12}
-$$
-
-
-and
-
-$$
-|F_2|<10^{-12}.
-$$
-
-
-Requiring both conditions is important. A small moment residual alone does not guarantee continuity, and a small continuity residual alone does not guarantee the prescribed $H_{rms}$ normalization.
-
-### Approximate initialization formulas
-
-Good initial estimates materially improve convergence of the coupled nonlinear system. Let
-
-$$
-x=\widetilde H_{tr}=H_{tr}/H_{rms}
-$$
-
-
-The first initial estimate is
-
-$$
-\widetilde H_1^{(0)}=\frac{\tanh\left(6.739139344110821x-0.01265095590917251\right)^{-0.6551633251836707}}{\tanh\left[\sinh\left(0.6947756601426412x+0.7908718490781483\right)\right]^{5.484052848550241}}
-$$
-
-
-The second initial estimate is
-
-$$
-\widetilde H_2^{(0)}=1.059259665431797+\frac{0.2059286860468916x}{1+3.865701948059343x^{-3.479682433107255}}
-$$
-
-
-These equations are **numerical initialization approximations**, not additional physical equations in the Battjes-Groenendijk model. They provide starting values only; the final values are obtained by satisfying the continuity and second-moment residuals.
-
-After initialization, non-positive trial values are replaced by a small positive number before the next residual evaluation.
-
-The approximations are smooth regressions of previously solved scale parameters as functions of $\widetilde H_{tr}$. Their purpose is numerical rather than physical:
-
-- they place the initial iterate close to the solution branch;
-- they reduce the number of Newton iterations;
-- they reduce the risk of crossing into non-positive scale parameters;
-- they improve consistency between the compiled and notebook implementations.
-
-The approximations must not be substituted for the final solution. The converged values are always those satisfying the exact continuity and second-moment equations.
+The solution is accepted only if both absolute residuals are below $10^{-10}$. The report lists both residuals and the scalar iteration count; no empirical initial-scale guesses or finite-difference Jacobian are required.
 
 ---
 
@@ -1051,10 +976,10 @@ H_{rms}=2.69\sqrt{m_0}
 $$
 
 
-whereas the narrow-band Rayleigh relation used to derive the exact $H_{1/N}/H_{m0}$ limits is
+whereas the narrow-band Rayleigh scale used to derive the exact $H_{1/N}/H_{m0}$ limits is
 
 $$
-H_{rms}=\sqrt{8m_0}\approx2.828427\sqrt{m_0}
+H_{rms,R}=\sqrt{8m_0}\approx2.828427\sqrt{m_0}
 $$
 
 
@@ -1071,7 +996,7 @@ $$
 
 the program bypasses the nonlinear Composite Weibull solution and directly assigns the exact Rayleigh $H_{1/N}/H_{m0}$ values listed above.
 
-In this branch, $H_1$ and $H_2$ are not required and should be treated as not applicable, even if a particular language implementation displays zero or `NaN` placeholders.
+In this branch, $H_1$, $H_2$, and $q$ are not calculated and appear as `N/A`. The Rayleigh reference uses $H_{rms,R}=H_{m0}/\sqrt{2}$, while the report also retains empirical $H_{rms}$ as a separate diagnostic.
 
 ### Safeguard 2: dimensional caps
 
@@ -1084,14 +1009,13 @@ $$
 
 where $C_N$ is the corresponding exact Rayleigh ratio.
 
-After capping, the software back-calculates the reported normalized values:
+After capping, the code calculates the final normalized value:
 
 $$
-\widetilde H_{1/N}=H_{1/N}/H_{rms}
+\widetilde H_{1/N}^{final}=H_{1/N}^{final}/H_{rms}.
 $$
 
-
-This ensures that dimensional values, normalized values, and diagnostic ratios remain mutually consistent in the report.
+The report distinguishes uncapped means, Rayleigh reference means and final means, with a `YES` or `NO` limit indicator. The exceedance threshold $H_N$ is not capped.
 
 ### Why a normalized Rayleigh limit is not sufficient
 
@@ -1110,64 +1034,60 @@ $$
 
 is an implementation criterion for deep-water convergence, not a physical breaker index. Immediately above the threshold, the direct Rayleigh constants are used. At or below the threshold, the CWD is solved and each final dimensional statistic is capped individually.
 
-Because the caps are applied statistic by statistic, the selected CWD tail may coincide with the Rayleigh limit for one $N$ while remaining below it for another. The final reported normalized values are recalculated from the capped dimensional values so that all output columns remain internally consistent.
+Because the limits apply separately to each conditional mean, a displayed final mean is not necessarily a moment of one modified probability distribution. The $H_N$ thresholds always belong to the selected CWD or Rayleigh branch.
 
 ---
 
 ## Calculation sequence
 
-For each valid input set, the software performs the following operations:
+For each valid input set, the Windows C++ software:
 
-1. Validate that $H_{m0}$, $d$, and $M$ are finite and positive.
-2. Calculate $m_0=(H_{m0}/4)^2$.
-3. Calculate $H_{rms}$ from the Battjes-Groenendijk empirical relation.
-4. Calculate $\tan\alpha=1/M$.
-5. Calculate $H_{tr}=(0.35+5.8\tan\alpha)d$.
-6. Calculate $\widetilde H_{tr}=H_{tr}/H_{rms}$.
-7. Select the Rayleigh branch when $\widetilde H_{tr}>2.75$.
-8. Otherwise, initialize and solve for $\widetilde H_1$ and $\widetilde H_2$.
-9. Calculate $\widetilde H_N$ and $\widetilde H_{1/N}$ for each requested $N$.
-10. Convert the normalized results to metres.
-11. Apply the Rayleigh dimensional caps.
-12. Recalculate normalized values from the final capped dimensional results.
-13. Calculate diagnostic ratios relative to $H_{1/3}$.
-14. Display the results and write `report.txt` where supported.
+1. Checks that $H_{m0}$, $d$, and $M$ are finite and strictly positive.
+2. Computes $m_0=(H_{m0}/4)^2$, $\mu=\sqrt{m_0}/d$, and empirical $H_{rms}$.
+3. Computes $\tan\alpha=1/M$, $H_{tr}$, and $t=H_{tr}/H_{rms}$.
+4. Uses Rayleigh directly when $t>2.75$; otherwise solves the CWD scalar equation for $q$.
+5. Reconstructs $\widetilde H_1$, $\widetilde H_2$ and verifies continuity and second moment.
+6. Computes thresholds $H_N$ and uncapped highest-fraction means for the six $N$ values.
+7. Calculates Rayleigh reference means $C_NH_{m0}$ and applies individual mean-height limits.
+8. Recalculates normalized final means and ratios relative to $H_{1/3}$.
+9. Reports diagnostics, branch identification, limit flags, and applicability warnings.
+10. Displays the report and writes the same aligned text to `report.txt`.
 
 ### Reference pseudocode
 
 ```text
-read Hm0, d, M
-validate Hm0 > 0, d > 0, M > 0 and all values finite
+read Hm0, d, M; require finite positive values
+sigma = Hm0 / 4
+m0    = sigma^2
+mu    = sigma / d
+Hrms  = (2.69 + 3.24 * mu) * sigma
+Htr   = (0.35 + 5.8 / M) * d
+t     = Htr / Hrms
 
-m0        = (Hm0 / 4)^2
-sqrt_m0   = sqrt(m0)
-Hrms      = (2.69 + 3.24 * sqrt_m0 / d) * sqrt_m0
-tan_alpha = 1 / M
-Htr       = (0.35 + 5.8 * tan_alpha) * d
-Htr_tilde = Htr / Hrms
-
-if Htr_tilde > 2.75:
-    distribution = Rayleigh
-    assign exact Rayleigh H1/N = C_N * Hm0
+if t <= 2.75:
+    solve scalar moment equation in z = log(q)
+    H1tilde = t * q^(-1/2)
+    H2tilde = t * q^(-1/3.6)
+    check second-moment and continuity residuals
+    branch = Composite Weibull (B&G)
 else:
-    distribution = B&G
-    evaluate empirical initial guesses
-    solve continuity and second-moment residuals
-    for N in {3, 10, 50, 100, 250, 1000}:
-        determine the branch containing H_N
-        integrate the corresponding upper tail
-        dimensionalize with Hrms
-        cap the result at C_N * Hm0
-        recalculate the normalized final value
+    branch = Rayleigh
+    H1tilde = H2tilde = N/A
 
-calculate ratios H1/N / H1/3
-format the report
-write report.txt
+for N in {3, 10, 50, 100, 250, 1000}:
+    H_N = exceedance threshold of selected branch
+    raw_mean = upper-tail conditional mean
+    rayleigh_mean = C_N * Hm0
+    final_mean = min(raw_mean, rayleigh_mean) for CWD
+    final_mean = rayleigh_mean for Rayleigh
+    final_normalized = final_mean / Hrms
+
+format report and write report.txt
 ```
 
 ### Computational complexity
 
-The calculation is small. Each case requires only a two-variable nonlinear solve and a limited number of incomplete-gamma evaluations. Runtime is normally negligible compared with spectral wave propagation, CFD, Boussinesq, or phase-resolving models. The primary implementation concern is numerical correctness and cross-language consistency rather than computational cost.
+The calculation requires one scalar root solve only when the CWD branch is selected, followed by a small number of incomplete-gamma evaluations. Runtime is negligible relative to spectral wave propagation. Robustness of the special functions, positivity of the scalar root, and consistency of the reported statistics are more important than execution speed.
 
 ---
 
@@ -1202,25 +1122,23 @@ Use a representative local or averaged foreshore slope consistent with the point
 
 ### Distribution type
 
-- `B&G`: the Composite Weibull equations were solved.
-- `Rayleigh`: the normalized transition exceeded 2.75 and the direct Rayleigh branch was used.
+- `Composite Weibull (B&G)`: the scalar CWD equation was solved and both constraints were checked.
+- `Rayleigh`: the normalized transition exceeded 2.75 and direct Rayleigh statistics were used.
 
 ### Scale parameters
 
-$H_1$ and $H_2$ are mathematical scale parameters of the two Weibull branches. They are not breaker heights and should not be interpreted as independent physical wave statistics.
+$H_1$ and $H_2$ are Weibull scale parameters, not breaker heights. Their normalized and dimensional values are reported in the CWD branch; they are marked `N/A` in the Rayleigh branch. The code also reports $q$, $P(H>H_{tr})=e^{-q}$ and $N_{tr}=e^q$.
 
 ### Mean-high-wave statistics
 
-The program reports:
+The program reports the six fractions $1/3$, $1/10$, $1/50$, $1/100$, $1/250$, and $1/1000$. For each it distinguishes:
 
-- $H_{1/3}$: mean of the highest one-third;
-- $H_{1/10}$: mean of the highest one-tenth;
-- $H_{1/50}$: mean of the highest one-fiftieth;
-- $H_{1/100}$: mean of the highest one-hundredth;
-- $H_{1/250}$: mean of the highest one-two-hundred-and-fiftieth;
-- $H_{1/1000}$: mean of the highest one-thousandth.
+- $H_N$: height exceeded with probability $1/N$ in the selected distribution;
+- raw $H_{1/N}$: mean of the highest fraction before any cap;
+- Rayleigh reference mean $C_NH_{m0}$;
+- final $H_{1/N}$ and a `YES`/`NO` indicator of an applied limit.
 
-Both normalized values $H/H_{rms}$ and dimensional values in metres are reported.
+The report also includes final $H_{1/N}/H_{rms}$ and never treats $H_N$ as a storm maximum.
 
 ### Diagnostic ratios
 
@@ -1251,7 +1169,7 @@ H_{1/1000}/H_{1/3}
 $$
 
 
-These ratios describe the upper-tail shape independently of the absolute wave-height scale.
+These ratios use the **final** mean-high-wave values and are dimensionless. The diagnostic section also reports the iteration count and the second-moment and continuity residuals for CWD cases.
 
 ---
 
@@ -1289,17 +1207,18 @@ Because $\widetilde H_{tr}<2.75$, the `B&G` branch is used. The C++ implementati
 
 | Quantity | Result |
 |---|---:|
-| $\widetilde H_1$ | 1.1567 |
-| $\widetilde H_2$ | 1.1102 |
-| $H_{1/3}$ | 2.5027 m |
-| $H_{1/10}$ | 2.9701 m |
-| $H_{1/50}$ | 3.3296 m |
-| $H_{1/100}$ | 3.4567 m |
-| $H_{1/250}$ | 3.6077 m |
-| $H_{1/1000}$ | 3.8086 m |
-| $H_{1/1000}/H_{1/3}$ | 1.5218 |
+| $\widetilde H_1$ | 1.156695 |
+| $\widetilde H_2$ | 1.110155 |
+| Transition exponent $q$ | 0.831268 |
+| $H_{1/3}$ before limit | 2.5911 m |
+| Final $H_{1/3}$ (Rayleigh-limited) | 2.5027 m |
+| Final $H_{1/10}$ | 2.9701 m |
+| Final $H_{1/50}$ | 3.3296 m |
+| Final $H_{1/100}$ | 3.4567 m |
+| Final $H_{1/250}$ | 3.6077 m |
+| Final $H_{1/1000}$ | 3.8086 m |
 
-Small differences in the last displayed digit can occur between language implementations because of formatting and special-function evaluation.
+Here the raw $H_{1/3}$ exceeds its Rayleigh reference and is limited. The $H_N$ exceedance thresholds, including $H_3=2.2043$ m, remain calculated from the CWD.
 
 ### Rayleigh-branch example
 
@@ -1329,7 +1248,7 @@ $$
 and
 
 $$
-\widetilde H_{tr} = \frac{8.16}{1.74453125} \approx4.6772.
+\widetilde H_{tr} = \frac{8.16}{1.74453125} \approx4.6775.
 $$
 
 
@@ -1344,7 +1263,7 @@ Because $\widetilde H_{tr}>2.75$, the direct Rayleigh branch is selected. The co
 | $H_{1/250}$ | 4.502543 m |
 | $H_{1/1000}$ | 4.962089 m |
 
-This example also demonstrates that the direct Rayleigh branch uses exact ratios to $H_{m0}$ rather than dimensionalizing the empirical Battjes-Groenendijk $H_{rms}$.
+The Rayleigh branch uses the scale $H_{m0}/\sqrt{2}$ for its exceedance thresholds and the tabulated coefficients for its conditional means. The empirical CWD $H_{rms}$ remains in the intermediate results.
 
 ---
 
@@ -1388,7 +1307,7 @@ $$
 $$
 
 
-The 1998 validation report identified the main validated conditions as:
+The original studies identify an approximate domain that includes:
 
 - degree of saturation approximately $0<\sqrt{m_0}/d<0.15$;
 - equivalently, approximately $0<H_{m0}/d<0.6$ because $H_{m0}=4\sqrt{m_0}$;
@@ -1396,7 +1315,7 @@ The 1998 validation report identified the main validated conditions as:
 - simple, gradually varying foreshore geometry;
 - local wave conditions that have had sufficient propagation distance to adapt to the depth.
 
-The source database included slopes $1:20$, $1:30$, $1:50$, $1:100$, and $1:250$ and predominantly JONSWAP-type laboratory spectra.
+The source database included slopes $1:20$, $1:30$, $1:50$, $1:100$, and $1:250$ and predominantly JONSWAP-type laboratory spectra. The C++ output flags $M<20$ or $M>250$, and flags $\mu<0.025$ or $\mu>0.16$ when CWD is selected.
 
 ### Point-model assumption
 
@@ -1494,10 +1413,10 @@ For overtopping or structural calculations, verify which wave-height definition 
 | `shallow-water-waves_cli.f90` | Fortran command-line implementation |
 | `shallow_water_waves.m` | MATLAB function returning a results structure |
 | `shallow-water-waves.ipynb` | Python/Jupyter implementation, tables, and plots |
-| `android.apk` | Android Studio project for the Weibull Waves app |
-| `README.md` | theory, equations, limitations, build instructions, and usage |
+| `weibull.apk` | Android application installation package |
+| `manual.md` | theory, equations, limitations, build instructions, and usage |
 
-All implementations use the same physical parameterization, target statistics, Rayleigh limits, and nonlinear governing equations.
+The Windows C++ GUI and portable C++ CLI share the scalar CWD formulation and aligned report. Other implementations should be checked individually for numerical details and available diagnostics.
 
 ---
 
@@ -1585,10 +1504,10 @@ shallow-water-waves_gui.exe
 Enter:
 
 - `Hm0 (m)`;
-- `d (m)`;
-- `Beach slope m` for a slope $1:m$;
+- `Depth d (m)`;
+- `Slope 1:M` with the denominator $M$;
 
-then press **Compute**. The report is displayed in the window and written to `report.txt`.
+then press **Compute**. The report is displayed in a monospaced output window and saved in UTF-8 as `report.txt`. Labels and numerical columns are aligned, and no extra blank lines follow the report.
 
 ---
 
@@ -1727,13 +1646,13 @@ Run the cells sequentially and modify the input cell before executing the final 
 
 Recommended cross-language verification steps:
 
-1. Use the same $H_{m0}$, $d$, and $M$ in every implementation.
-2. Confirm the same `distribution_type`.
+1. Use identical $H_{m0}$, $d$, and $M$ input in GUI and CLI.
+2. Confirm the same distribution branch.
 3. Compare $m_0$, $H_{rms}$, $H_{tr}$, and $\widetilde H_{tr}$.
-4. In the `B&G` branch, compare $\widetilde H_1$ and $\widetilde H_2$.
-5. Compare all final dimensional $H_{1/N}$ values after capping.
-6. Compare diagnostic ratios using the final capped values.
-7. Confirm both nonlinear residuals are below the specified tolerance.
+4. For CWD, compare $q$, $\widetilde H_1$, $\widetilde H_2$, and both residuals.
+5. Compare $H_N$, raw means, reference Rayleigh means, and final capped means.
+6. Compare normalized means, limit indicators and final diagnostic ratios.
+7. Confirm both residuals are below $10^{-10}$ for solved CWD cases.
 
 Minor floating-point differences are expected, but engineering outputs should agree to the displayed precision.
 
@@ -1743,7 +1662,7 @@ Minor floating-point differences are expected, but engineering outputs should ag
 
 **Confusing $H_{m0}$ and $H_{1/3}$.** They are approximately equal in deep water but not generally identical on a shallow foreshore.
 
-**Confusing $H_N$ and $H_{1/N}$.** One is a threshold; the other is a conditional mean above that threshold.
+**Confusing $H_N$ and $H_{1/N}$.** One is a threshold of the selected distribution; the other is a conditional mean. Rayleigh limits apply to final conditional means, not to CWD thresholds.
 
 **Entering the tangent instead of the slope denominator.** For $1:100$, enter `100`, not `0.01`.
 
