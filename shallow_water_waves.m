@@ -46,19 +46,7 @@ function results = shallow_water_waves(HM0, DEPTH, M)
 
     if results.uses_cwd
         t = results.Htr_tilde;
-        logt = log(t);
-        f = @(z) scalar_log_moment(z, logt, k1, k2);
-        za = -700; zb = log(64);
-        if ~(isfinite(f(za)) && isfinite(f(zb)) && f(za)>0 && f(zb)<0)
-            error('CWD scalar solution is outside the representable range.');
-        end
-        % MATLAB fzero employs a safeguarded Brent-type scalar algorithm.
-        options = optimset('TolX',2e-14,'MaxIter',200,'Display','off');
-        [z, residual, exitflag, output] = fzero(f,[za zb],options);
-        if exitflag <= 0 || ~isfinite(z) || abs(residual)>1e-10
-            error('CWD scalar solver did not converge.');
-        end
-        q = positive(exp(z), 'Transition exponent');
+        [q, z, iterations] = solve_transition_exponent(t, k1, k2);
         a1 = positive(t*exp(-z/k1), 'First Weibull scale');
         a2 = positive(t*exp(-z/k2), 'Second Weibull scale');
         results.H1_Hrms = a1; results.H2_Hrms = a2;
@@ -67,7 +55,7 @@ function results = shallow_water_waves(HM0, DEPTH, M)
         results.transition_exponent = q;
         results.transition_exceedance_probability = exp(-q);
         results.transition_recurrence_count = exp(q);
-        results.solver_iterations = output.iterations;
+        results.solver_iterations = iterations;
         m2 = a1^2*gamma_lower(1+2/k1,q) + a2^2*gamma_upper(1+2/k2,q);
         results.moment_residual = sqrt(m2)-1;
         results.continuity_residual = (t/a1)^k1-(t/a2)^k2;
@@ -166,12 +154,44 @@ function y = gamma_interval(a,lo,hi)
     y = positive(y,'Gamma interval integral');
 end
 
-function y = scalar_log_moment(z, logt, k1, k2)
-    q = exp(z);
-    kernel = exp(-2*z/k1)*gamma_lower(1+2/k1,q) + ...
-             exp(-2*z/k2)*gamma_upper(1+2/k2,q);
-    if ~(isfinite(kernel)&&kernel>0), error('Invalid CWD second-moment kernel.'); end
-    y = 2*logt + log(kernel);
+function [q, z, iterations] = solve_transition_exponent(t, k1, k2)
+    positive(t, 'Normalized transition height');
+    q0 = 1.002054709*t*t*tanh(t^1.652259933) * ...
+         exp(-tanh(tanh(t))*exp(-2.146235748*t));
+    positive(q0, 'Newton initial transition exponent');
+    z = log(q0);
+    logt = log(t);
+    maxIterations = 40;
+    rootTolerance = 5e-13;
+    for iteration = 0:maxIterations
+        [residual, derivative] = evaluate_log_moment(z, logt, k1, k2);
+        if abs(residual) <= rootTolerance
+            iterations = iteration;
+            q = positive(exp(z), 'CWD transition exponent');
+            return;
+        end
+        if iteration == maxIterations
+            break;
+        end
+        z = z - residual/derivative;
+        if ~isfinite(z)
+            error('Non-finite Newton iteration.');
+        end
+    end
+    error('CWD Newton solver did not converge.');
+end
+
+function [residual, derivative] = evaluate_log_moment(z, logt, k1, k2)
+    q = positive(exp(z), 'Transition exponent q');
+    lower = exp(-2*z/k1)*gamma_lower(1+2/k1,q);
+    upper = exp(-2*z/k2)*gamma_upper(1+2/k2,q);
+    kernel = positive(lower+upper, 'Second-moment kernel');
+    residual = 2*logt + log(kernel);
+    % Exact logarithmic derivative; the gamma boundary terms cancel.
+    derivative = -((2/k1)*lower+(2/k2)*upper)/kernel;
+    if ~isfinite(residual) || ~isfinite(derivative) || ~(derivative < 0)
+        error('Invalid Newton residual or derivative.');
+    end
 end
 
 function text = format_report(r)

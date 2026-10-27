@@ -21,7 +21,7 @@ module shallow_water_wave_statistics
     integer, parameter :: dp = real64
     real(dp), parameter :: k1 = 2.0_dp, k2 = 3.6_dp, rayleigh_switch = 2.75_dp
     real(dp), parameter :: numerical_tol = 2.5e-14_dp
-    integer, parameter :: max_gamma_iterations = 10000, max_root_iterations = 200
+    integer, parameter :: max_gamma_iterations = 10000, max_root_iterations = 40
     integer, parameter :: n_values(6) = [3, 10, 50, 100, 250, 1000]
     real(dp), parameter :: rayleigh_mean_factors(6) = [ &
         1.001075736951740_dp, 1.272734273369137_dp, &
@@ -194,101 +194,57 @@ contains
         call require_positive(value, 'Gamma interval integral')
     end function
 
-    function logarithmic_moment_residual(log_q, log_t) result(residual)
+    ! Scalar Composite Weibull RMS closure in z = log(q).
+    ! The derivative is analytic: the incomplete-gamma boundary terms cancel.
+    subroutine evaluate_log_moment(log_q, log_t, residual, derivative)
         real(dp), intent(in) :: log_q, log_t
-        real(dp) :: residual, q, lower, upper, kernel
+        real(dp), intent(out) :: residual, derivative
+        real(dp) :: q, lower, upper, kernel
         q = exp(log_q)
-        lower = exp(-(2.0_dp/k1) * log_q) * gamma_lower(1.0_dp + 2.0_dp/k1, q)
-        upper = exp(-(2.0_dp/k2) * log_q) * gamma_upper(1.0_dp + 2.0_dp/k2, q)
+        call require_positive(q, 'Transition exponent q')
+        lower = exp(-(2.0_dp/k1)*log_q) * gamma_lower(1.0_dp + 2.0_dp/k1, q)
+        upper = exp(-(2.0_dp/k2)*log_q) * gamma_upper(1.0_dp + 2.0_dp/k2, q)
         kernel = lower + upper
         call require_positive(kernel, 'Second-moment kernel')
-        residual = 2.0_dp * log_t + log(kernel)
+        residual = 2.0_dp*log_t + log(kernel)
+        derivative = -((2.0_dp/k1)*lower + (2.0_dp/k2)*upper)/kernel
+        if (.not. ieee_is_finite(residual) .or. .not. ieee_is_finite(derivative)) &
+            call fail('Invalid Newton residual or derivative.')
+        if (derivative >= 0.0_dp) call fail('Invalid Newton residual or derivative.')
+    end subroutine
+
+    function initial_transition_exponent(t) result(q0)
+        real(dp), intent(in) :: t
+        real(dp) :: q0
+        q0 = 1.002054709_dp*t*t*tanh(t**1.652259933_dp) * &
+             exp(-tanh(tanh(t))*exp(-2.146235748_dp*t))
     end function
 
     function solve_transition_exponent(t, iterations) result(q)
         real(dp), intent(in) :: t
         integer, intent(out) :: iterations
-        real(dp) :: q, log_t, a, b, c, fa, fb, fc, step, prev_step
-        real(dp) :: tolerance, middle, s, p, denom, q_ratio, r_ratio, bound1, bound2
+        real(dp), parameter :: root_tol = 5.0e-13_dp
+        real(dp) :: q, q0, z, log_t, residual, derivative, delta_z
         integer :: iter
         call require_positive(t, 'Normalized transition height')
+        q0 = initial_transition_exponent(t)
+        call require_positive(q0, 'Newton initial transition exponent')
+        z = log(q0)
         log_t = log(t)
-        a = -700.0_dp
-        b = log(64.0_dp)
-        fa = logarithmic_moment_residual(a, log_t)
-        fb = logarithmic_moment_residual(b, log_t)
-        if (.not. ieee_is_finite(fa) .or. .not. ieee_is_finite(fb)) &
-            call fail('CWD scalar solution is outside the representable range.')
-        if (fa <= 0.0_dp .or. fb >= 0.0_dp) &
-            call fail('CWD scalar solution is outside the representable range.')
-        c = a
-        fc = fa
-        step = b-a
-        prev_step = step
-        do iter = 1, max_root_iterations
-            if ((fb > 0.0_dp .and. fc > 0.0_dp) .or. &
-                (fb < 0.0_dp .and. fc < 0.0_dp)) then
-                c = a
-                fc = fa
-                step = b-a
-                prev_step = step
-            end if
-            if (abs(fc) < abs(fb)) then
-                a = b
-                b = c
-                c = a
-                fa = fb
-                fb = fc
-                fc = fa
-            end if
-            tolerance = 2.0_dp * epsilon(1.0_dp) * abs(b) + 2.0e-14_dp
-            middle = 0.5_dp * (c-b)
-            if (abs(middle) <= tolerance .or. abs(fb) < tiny(1.0_dp)) then
+        do iter = 0, max_root_iterations
+            call evaluate_log_moment(z, log_t, residual, derivative)
+            if (abs(residual) <= root_tol) then
                 iterations = iter
-                q = exp(b)
+                q = exp(z)
                 call require_positive(q, 'CWD transition exponent')
-                if (abs(logarithmic_moment_residual(b, log_t)) > 1.0e-10_dp) &
-                    call fail('CWD root residual exceeds tolerance.')
                 return
             end if
-            if (abs(prev_step) >= tolerance .and. abs(fa) > abs(fb)) then
-                s = fb/fa
-                if (abs(a-c) < tiny(1.0_dp)) then
-                    p = 2.0_dp * middle * s
-                    denom = 1.0_dp - s
-                else
-                    q_ratio = fa/fc
-                    r_ratio = fb/fc
-                    p = s * (2.0_dp * middle * q_ratio * (q_ratio-r_ratio) - &
-                            (b-a) * (r_ratio-1.0_dp))
-                    denom = (q_ratio-1.0_dp) * (r_ratio-1.0_dp) * (s-1.0_dp)
-                end if
-                if (p > 0.0_dp) denom = -denom
-                p = abs(p)
-                bound1 = 3.0_dp * middle * denom - abs(tolerance * denom)
-                bound2 = abs(prev_step * denom)
-                if (abs(denom) > 0.0_dp .and. 2.0_dp * p < min(bound1, bound2)) then
-                    prev_step = step
-                    step = p/denom
-                else
-                    step = middle
-                    prev_step = middle
-                end if
-            else
-                step = middle
-                prev_step = middle
-            end if
-            a = b
-            fa = fb
-            if (abs(step) > tolerance) then
-                b = b + step
-            else
-                b = b + sign(tolerance, middle)
-            end if
-            fb = logarithmic_moment_residual(b, log_t)
-            if (.not. ieee_is_finite(fb)) call fail('Non-finite scalar root residual.')
+            if (iter == max_root_iterations) exit
+            delta_z = -residual/derivative
+            z = z + delta_z
+            if (.not. ieee_is_finite(z)) call fail('Non-finite Newton iteration.')
         end do
-        call fail('CWD scalar solver did not converge.')
+        call fail('CWD Newton solver did not converge.')
         q = 0.0_dp
         iterations = 0
     end function
