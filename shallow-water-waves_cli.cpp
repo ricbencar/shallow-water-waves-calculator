@@ -45,7 +45,7 @@ constexpr double K2 = 3.6;
 constexpr double RAYLEIGH_SWITCH = 2.75;
 constexpr double NUMERICAL_TOL = 2.5e-14;
 constexpr int MAX_GAMMA_ITERATIONS = 10000;
-constexpr int MAX_ROOT_ITERATIONS = 200;
+constexpr int MAX_ROOT_ITERATIONS = 40;
 
 constexpr std::array<int, 6> N_VALUES{{3, 10, 50, 100, 250, 1000}};
 constexpr std::array<double, 6> RAYLEIGH_MEAN_FACTORS{{
@@ -229,110 +229,64 @@ static double gamma_interval(double a, double low, double high) {
     return checked_positive(integral * half_width, "Gamma interval integral");
 }
 
-// For q=(Htr/H1)^k1=(Htr/H2)^k2, the normalized second moment is
-// t^2 * [q^(-2/k1)*gamma(1+2/k1,q)
-//       +q^(-2/k2)*Gamma(1+2/k2,q)], where t=Htr/Hrms.
-static double logarithmic_moment_residual(double log_q, double log_t) {
+// Composite Weibull RMS closure, solved in logarithmic coordinates.
+// q0 is an explicit approximation; the returned q satisfies the complete moment equation.
+static double initial_transition_exponent(double t) {
+    return 1.002054709 * t * t * std::tanh(std::pow(t, 1.652259933)) *
+           std::exp(-std::tanh(std::tanh(t)) * std::exp(-2.146235748 * t));
+}
+
+struct LogMomentEvaluation {
+    double residual = 0.0;
+    double derivative = 0.0;
+};
+
+// With L=q^(-2/K1)*gamma(1+2/K1,q) and
+// U=q^(-2/K2)*Gamma(1+2/K2,q), R=2*ln(t)+ln(L+U).
+// The incomplete-gamma boundary derivatives cancel exactly:
+// dR/dln(q) = -((2/K1)*L + (2/K2)*U)/(L+U).
+static LogMomentEvaluation evaluate_log_moment(double log_q, double log_t) {
     const double q = std::exp(log_q);
+    require_finite_positive(q, "Transition exponent q");
     const double lower = std::exp(-(2.0 / K1) * log_q) *
                          gamma_lower(1.0 + 2.0 / K1, q);
     const double upper = std::exp(-(2.0 / K2) * log_q) *
                          gamma_upper(1.0 + 2.0 / K2, q);
-    const double bracket = lower + upper;
-    require_finite_positive(bracket, "Second-moment kernel");
-    return 2.0 * log_t + std::log(bracket);
+    const double kernel = lower + upper;
+    require_finite_positive(kernel, "Second-moment kernel");
+    const double residual = 2.0 * log_t + std::log(kernel);
+    const double derivative = -((2.0 / K1) * lower + (2.0 / K2) * upper) / kernel;
+    if (!std::isfinite(residual) || !std::isfinite(derivative) ||
+        !(derivative < 0.0)) {
+        throw std::runtime_error("Invalid Newton residual or derivative.");
+    }
+    return {residual, derivative};
 }
 
-// Brent's bracketed scalar solver, operating on z=log(q) to keep q positive.
-// The moment function is strictly decreasing with q.
 static double solve_transition_exponent(double t, int& iterations) {
     require_finite_positive(t, "Normalized transition height");
+    const double q0 = initial_transition_exponent(t);
+    require_finite_positive(q0, "Newton initial transition exponent");
     const double log_t = std::log(t);
-    const auto f = [log_t](double z) {
-        return logarithmic_moment_residual(z, log_t);
-    };
+    double z = std::log(q0);
+    constexpr double ROOT_TOL = 5.0e-13;
 
-    double a = -700.0;
-    double b = std::log(64.0);
-    double fa = f(a);
-    double fb = f(b);
-    if (!(std::isfinite(fa) && std::isfinite(fb) && fa > 0.0 && fb < 0.0)) {
-        throw std::runtime_error("CWD scalar solution is outside the representable range.");
-    }
-
-    double c = a;
-    double fc = fa;
-    double step = b - a;
-    double previous_step = step;
-
-    for (int iteration = 1; iteration <= MAX_ROOT_ITERATIONS; ++iteration) {
-        if ((fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0)) {
-            c = a;
-            fc = fa;
-            step = b - a;
-            previous_step = step;
-        }
-        if (std::abs(fc) < std::abs(fb)) {
-            a = b;
-            b = c;
-            c = a;
-            fa = fb;
-            fb = fc;
-            fc = fa;
-        }
-
-        const double tolerance = 2.0 * std::numeric_limits<double>::epsilon() *
-                                 std::abs(b) + 2.0e-14;
-        const double mid = 0.5 * (c - b);
-        if (std::abs(mid) <= tolerance || fb == 0.0) {
+    for (int iteration = 0; iteration <= MAX_ROOT_ITERATIONS; ++iteration) {
+        const LogMomentEvaluation e = evaluate_log_moment(z, log_t);
+        if (std::abs(e.residual) <= ROOT_TOL) {
             iterations = iteration;
-            const double q = std::exp(b);
+            const double q = std::exp(z);
             require_finite_positive(q, "CWD transition exponent");
-            if (std::abs(f(b)) > 1e-10) {
-                throw std::runtime_error("CWD root residual exceeds tolerance.");
-            }
             return q;
         }
-
-        if (std::abs(previous_step) >= tolerance && std::abs(fa) > std::abs(fb)) {
-            const double s = fb / fa;
-            double p = 0.0;
-            double denom = 0.0;
-            if (a == c) {
-                p = 2.0 * mid * s;
-                denom = 1.0 - s;
-            } else {
-                const double q_ratio = fa / fc;
-                const double r_ratio = fb / fc;
-                p = s * (2.0 * mid * q_ratio * (q_ratio - r_ratio) -
-                         (b - a) * (r_ratio - 1.0));
-                denom = (q_ratio - 1.0) * (r_ratio - 1.0) * (s - 1.0);
-            }
-            if (p > 0.0) denom = -denom;
-            p = std::abs(p);
-            const double bound1 = 3.0 * mid * denom - std::abs(tolerance * denom);
-            const double bound2 = std::abs(previous_step * denom);
-            if (denom != 0.0 && 2.0 * p < std::min(bound1, bound2)) {
-                previous_step = step;
-                step = p / denom;
-            } else {
-                step = mid;
-                previous_step = mid;
-            }
-        } else {
-            step = mid;
-            previous_step = mid;
-        }
-
-        a = b;
-        fa = fb;
-        b += (std::abs(step) > tolerance) ? step : std::copysign(tolerance, mid);
-        fb = f(b);
-        if (!std::isfinite(fb)) {
-            throw std::runtime_error("Non-finite scalar root residual.");
+        if (iteration == MAX_ROOT_ITERATIONS) break;
+        const double delta_z = -e.residual / e.derivative;
+        z += delta_z;
+        if (!std::isfinite(z)) {
+            throw std::runtime_error("Non-finite Newton iteration.");
         }
     }
-    throw std::runtime_error("CWD scalar solver did not converge.");
+    throw std::runtime_error("CWD Newton solver did not converge.");
 }
 
 static double cwd_second_moment(double a1, double a2, double q) {
@@ -592,7 +546,7 @@ static std::wstring format_report(const Analysis& r) {
 
     out << L"\nNUMERICAL DIAGNOSTICS\n";
     if (r.uses_cwd) {
-        report_field(out, L"Scalar root iterations",
+        report_field(out, L"Newton iterations",
                      std::to_wstring(r.solver_iterations));
         report_field(out, L"Second-moment residual",
                      report_number(r.moment_residual, 10, true));

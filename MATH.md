@@ -445,6 +445,133 @@ $$ \frac{dq}{d\tau}=-\frac{2U(q)}{\tau U'(q)}>0. $$
 
 Increasing the normalized transitional height therefore moves the transition to progressively smaller exceedance probabilities.
 
+
+### 7.2 Newton–Raphson solution in logarithmic coordinates
+
+The normalization condition is solved for each prescribed positive normalized transition
+
+$$
+\tau=\frac{H_{tr}}{H_{rms}}>0.
+$$
+
+Introduce the logarithmic unknown
+
+$$
+z=\ln q,\qquad q=e^z>0.
+$$
+
+Writing $U(q)=U_1(q)+U_2(q)$ as in Section 7.1, the logarithmic residual is
+
+$$
+\boxed{R(z;\tau)=2\ln\tau+\ln\left[U_1(e^z)+U_2(e^z)\right].}
+$$
+
+The normalization equation is equivalent to $R(z;\tau)=0$.
+
+#### Explicit starting approximation
+
+The initial value for the numerical iteration is
+
+$$
+\boxed{
+q_0(\tau)=1.002054709\,\tau^2
+\tanh\left(\tau^{1.652259933}\right)
+\exp\left[-\tanh(\tanh\tau)\exp(-2.146235748\,\tau)\right].
+}
+$$
+
+The starting logarithmic iterate is
+
+$$
+z_0=\ln q_0(\tau).
+$$
+
+All constants in this expression are fixed numerical values. The approximation provides an initial iterate; it does not replace the exact RMS closure.
+
+#### Analytical derivative
+
+The derivatives of the two moment terms with respect to $z$ are
+
+$$
+\frac{dU_1}{dz}=-\frac{2}{k_1}U_1+q e^{-q},
+$$
+
+$$
+\frac{dU_2}{dz}=-\frac{2}{k_2}U_2-q e^{-q}.
+$$
+
+The $q e^{-q}$ contributions cancel. Consequently,
+
+$$
+\frac{dU}{dz}=-\frac{2}{k_1}U_1-\frac{2}{k_2}U_2,
+$$
+
+and
+
+$$
+\boxed{R'(z;\tau)=-\frac{(2/k_1)U_1+(2/k_2)U_2}{U_1+U_2}.}
+$$
+
+For $k_1=2$ and $k_2=3.6$, this simplifies to
+
+$$
+\boxed{R'(z;\tau)=-\frac{U_1+\frac{5}{9}U_2}{U_1+U_2}.}
+$$
+
+Both moment contributions are positive when $q>0$. Thus
+
+$$
+-1<R'(z;\tau)<-\frac{5}{9}.
+$$
+
+The derivative is everywhere finite, negative and bounded away from zero over the positive domain.
+
+#### Newton iteration and numerical acceptance
+
+Newton–Raphson advances the logarithmic unknown according to
+
+$$
+\boxed{z_{n+1}=z_n-\frac{R(z_n;\tau)}{R'(z_n;\tau)},\qquad q_n=e^{z_n}.}
+$$
+
+Equivalently, in terms of the two moment contributions,
+
+$$
+z_{n+1}=z_n+R(z_n;\tau)
+\frac{U_1+U_2}{U_1+\frac59U_2}.
+$$
+
+The numerical implementation uses a maximum of 40 Newton steps and accepts a root when
+
+$$
+\boxed{|R(z_n;\tau)|\leq5\times10^{-13}.}
+$$
+
+It rejects non-finite iterates and non-positive or non-finite starting values. After convergence, the two scale parameters are reconstructed from $q=e^z$, and the original second-moment and continuity conditions must separately satisfy
+
+$$
+|R_m|\leq10^{-10},\qquad |R_c|\leq10^{-10}.
+$$
+
+The gamma-series and continued-fraction implementations use a relative tolerance of $2.5\times10^{-14}$ and a maximum of 10,000 iterations per special-function evaluation. No numerical differentiation or solution of a two-variable system is required.
+
+### 7.3 Analytical boundary at zero transition
+
+The original equation contains powers of $q$ and cannot be evaluated by direct substitution of $\tau=q=0$. Its positive-side limit is well defined. Using the leading term $U(q)\sim\Gamma(14/9)q^{-5/9}$ gives
+
+$$
+\boxed{q(\tau)\sim\left[\Gamma(14/9)\tau^2\right]^{9/5}\quad(\tau\to0^+).}
+$$
+
+Hence $q(0)=0$ in the sense of continuous extension. The normalized scale parameters satisfy
+
+$$
+\lim_{\tau\to0^+}a_2=\frac{1}{\sqrt{\Gamma(14/9)}},\qquad
+\lim_{\tau\to0^+}a_1=+\infty.
+$$
+
+At $\tau=0$, $z=\ln q$ is undefined. This boundary value is therefore obtained from the analytic limit rather than from Newton iteration. For the point calculator, positive $H_{m0}$, $d$, and $M$ give a strictly positive $\tau$.
+
 ## 8. CWD exceedance thresholds
 
 The CWD exceedance threshold satisfies
@@ -569,7 +696,7 @@ These relationships are empirical properties of the shallow-foreshore parameteri
 
 ### 11.1 Small transitional height
 
-As $\tau\to0$, the upper Weibull branch dominates.
+As $\tau\to0^+$, the upper Weibull branch dominates. The analytic boundary value $q(0)=0$ is defined by the positive-side limit in Section 7.3, not by direct evaluation of the singular scalar equation.
 
 $$ U(q)\sim q^{-2/k_2}\Gamma\left(1+\frac2{k_2}\right). $$
 
@@ -650,6 +777,8 @@ $$ \tau=\frac{2.0400}{1.934375}=1.0546042. $$
 The scalar RMS equation gives approximately
 
 $$ q=0.8312678123. $$
+
+For this case, the explicit initial approximation gives $q_0\simeq0.8303316764$. Newton–Raphson reaches the stated scalar root in two steps, evaluated with the analytical derivative and the logarithmic residual.
 
 The normalized Weibull scales are
 

@@ -487,7 +487,7 @@ const K2 = 3.6;
 const RAYLEIGH_SWITCH = 2.75;
 const NUMERICAL_TOL = 2.5e-14;
 const MAX_GAMMA_ITERATIONS = 10000;
-const MAX_ROOT_ITERATIONS = 200;
+const MAX_ROOT_ITERATIONS = 40;
 const N_VALUES = Object.freeze([3, 10, 50, 100, 250, 1000]);
 const RAYLEIGH_MEAN_FACTORS = Object.freeze([
   1.001075736951740,
@@ -624,79 +624,42 @@ function gammaInterval(a, low, high) {
   return requirePositive(sum * halfWidth, 'Gamma interval integral');
 }
 
-function logarithmicMomentResidual(logQ, logT) {
-  const q = Math.exp(logQ);
-  const lower = Math.exp(-(2 / K1) * logQ) * gammaLower(1 + 2 / K1, q);
-  const upper = Math.exp(-(2 / K2) * logQ) * gammaUpper(1 + 2 / K2, q);
-  return 2 * logT + Math.log(requirePositive(lower + upper, 'Second-moment kernel'));
+function initialTransitionExponent(t) {
+  return 1.002054709 * t * t * Math.tanh(Math.pow(t, 1.652259933)) *
+         Math.exp(-Math.tanh(Math.tanh(t)) * Math.exp(-2.146235748 * t));
 }
 
-// Bracketed scalar solution of the moment constraint in z = log(q).
+// Logarithmic RMS moment residual and its analytic derivative.
+function evaluateLogMoment(logQ, logT) {
+  const q = requirePositive(Math.exp(logQ), 'Transition exponent q');
+  const lower = Math.exp(-(2 / K1) * logQ) * gammaLower(1 + 2 / K1, q);
+  const upper = Math.exp(-(2 / K2) * logQ) * gammaUpper(1 + 2 / K2, q);
+  const kernel = requirePositive(lower + upper, 'Second-moment kernel');
+  const residual = 2 * logT + Math.log(kernel);
+  const derivative = -((2 / K1) * lower + (2 / K2) * upper) / kernel;
+  if (!(Number.isFinite(residual) && Number.isFinite(derivative) && derivative < 0)) {
+    throw new Error('Invalid Newton residual or derivative.');
+  }
+  return { residual, derivative };
+}
+
+// Newton-Raphson on z = ln(q) solves the exact moment constraint.
 function solveTransitionExponent(t) {
   requirePositive(t, 'Normalized transition height');
+  const q0 = requirePositive(initialTransitionExponent(t), 'Newton initial transition exponent');
   const logT = Math.log(t);
-  const f = z => logarithmicMomentResidual(z, logT);
-  let a = -700;
-  let b = Math.log(64);
-  let fa = f(a);
-  let fb = f(b);
-  if (!(Number.isFinite(fa) && Number.isFinite(fb) && fa > 0 && fb < 0)) {
-    throw new Error('CWD scalar solution is outside the representable range.');
+  let z = Math.log(q0);
+  const tolerance = 5e-13;
+  for (let iteration = 0; iteration <= MAX_ROOT_ITERATIONS; iteration += 1) {
+    const { residual, derivative } = evaluateLogMoment(z, logT);
+    if (Math.abs(residual) <= tolerance) {
+      return { q: requirePositive(Math.exp(z), 'CWD transition exponent'), iterations: iteration };
+    }
+    if (iteration === MAX_ROOT_ITERATIONS) break;
+    z -= residual / derivative;
+    if (!Number.isFinite(z)) throw new Error('Non-finite Newton iteration.');
   }
-  let c = a;
-  let fc = fa;
-  let step = b - a;
-  let previousStep = step;
-  for (let iteration = 1; iteration <= MAX_ROOT_ITERATIONS; iteration += 1) {
-    if ((fb > 0 && fc > 0) || (fb < 0 && fc < 0)) {
-      c = a; fc = fa; step = b - a; previousStep = step;
-    }
-    if (Math.abs(fc) < Math.abs(fb)) {
-      a = b; b = c; c = a;
-      fa = fb; fb = fc; fc = fa;
-    }
-    const tolerance = 2 * Number.EPSILON * Math.abs(b) + 2e-14;
-    const mid = 0.5 * (c - b);
-    if (Math.abs(mid) <= tolerance || fb === 0) {
-      const q = requirePositive(Math.exp(b), 'CWD transition exponent');
-      if (Math.abs(f(b)) > 1e-10) throw new Error('CWD root residual exceeds tolerance.');
-      return { q, iterations: iteration };
-    }
-    if (Math.abs(previousStep) >= tolerance && Math.abs(fa) > Math.abs(fb)) {
-      const s = fb / fa;
-      let p;
-      let denominator;
-      if (a === c) {
-        p = 2 * mid * s;
-        denominator = 1 - s;
-      } else {
-        const qRatio = fa / fc;
-        const rRatio = fb / fc;
-        p = s * (2 * mid * qRatio * (qRatio - rRatio) - (b - a) * (rRatio - 1));
-        denominator = (qRatio - 1) * (rRatio - 1) * (s - 1);
-      }
-      if (p > 0) denominator = -denominator;
-      p = Math.abs(p);
-      const bound1 = 3 * mid * denominator - Math.abs(tolerance * denominator);
-      const bound2 = Math.abs(previousStep * denominator);
-      if (denominator !== 0 && 2 * p < Math.min(bound1, bound2)) {
-        previousStep = step;
-        step = p / denominator;
-      } else {
-        step = mid;
-        previousStep = mid;
-      }
-    } else {
-      step = mid;
-      previousStep = mid;
-    }
-    a = b;
-    fa = fb;
-    b += Math.abs(step) > tolerance ? step : (mid < 0 ? -tolerance : tolerance);
-    fb = f(b);
-    if (!Number.isFinite(fb)) throw new Error('Non-finite scalar root residual.');
-  }
-  throw new Error('CWD scalar solver did not converge.');
+  throw new Error('CWD Newton solver did not converge.');
 }
 
 function cwdSecondMoment(a1, a2, q) {
@@ -874,7 +837,7 @@ function formatReport(r) {
   }
   lines.push('', 'NUMERICAL DIAGNOSTICS');
   if (r.uses_cwd) {
-    lines.push(reportField('Scalar root iterations', String(r.solver_iterations)),
+    lines.push(reportField('Newton iterations', String(r.solver_iterations)),
       reportField('Second-moment residual', reportNumber(r.moment_residual, 10, true)),
       reportField('Continuity exponent residual', reportNumber(r.continuity_residual, 10, true)));
   } else {
@@ -940,7 +903,7 @@ function renderResults(r, report) {
     parameterRow('Transition exponent, q', displayNum(r.transition_exponent, 6)),
     parameterRow('Probability P(H > Htr)', displayNum(r.transition_exceedance_probability, 9)),
     parameterRow('Transition recurrence count, Ntr', displayNum(r.transition_recurrence_count, 6)),
-    parameterRow('Scalar root iterations', r.uses_cwd ? String(r.solver_iterations) : 'N/A'),
+    parameterRow('Newton iterations', r.uses_cwd ? String(r.solver_iterations) : 'N/A'),
     parameterRow('Second-moment residual', r.uses_cwd ? reportNumber(r.moment_residual, 10, true) : 'N/A'),
     parameterRow('Continuity residual', r.uses_cwd ? reportNumber(r.continuity_residual, 10, true) : 'N/A')
   ].join('');
@@ -951,7 +914,7 @@ function renderResults(r, report) {
   if (r.uses_cwd && r.saturation_outside_observed_range) notices.push('The degree of saturation is outside the approximate range represented by the original foreshore tests.');
   const noticeMarkup = notices.length ? `<section class="panel notice" role="note"><strong>Applicability notice</strong><p>${notices.map(escapeHtml).join('</p><p>')}</p></section>` : '';
   const solverText = r.uses_cwd
-    ? `Scalar solution · ${r.solver_iterations} iteration${r.solver_iterations === 1 ? '' : 's'}`
+    ? `Newton solution · ${r.solver_iterations} iteration${r.solver_iterations === 1 ? '' : 's'}`
     : 'Direct Rayleigh statistics';
   document.getElementById('resultsArea').innerHTML = `
     <div class="summary">

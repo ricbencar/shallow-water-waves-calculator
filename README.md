@@ -8,7 +8,7 @@ The project computes characteristic individual-wave statistics from three local 
 - local still-water depth, $d$;
 - foreshore slope written as $1:M$, with $\tan\alpha=1/M$.
 
-The project includes a native Windows C++ interface, a portable C++ command-line program, and implementations in Fortran, MATLAB, Jupyter/Python, HTML, and Android. Numerical methods and available diagnostics may differ between implementations.
+The six source implementations comprise a native Windows C++ interface, a portable C++ command-line program, and programs in Fortran, MATLAB, Jupyter/Python, and HTML/JavaScript. All six use Newton–Raphson iteration on the same scalar RMS-closure equation, initialized by an explicit analytical approximation. Special-function algorithms, interfaces, and available diagnostics differ by programming language. An Android installation package is also included in the project.
 
 The implementation includes the deep-water convergence treatment discussed by Caires and Van Gent (2012): the Battjes-Groenendijk result is not permitted to exceed the corresponding Rayleigh value, and the program switches directly to Rayleigh statistics when the normalized transitional wave height is sufficiently large.
 
@@ -46,7 +46,7 @@ The program is a **point model**. It does not propagate a spectrum, solve wave t
 | 1998 | Groenendijk's MSc thesis and the WL \| Delft Hydraulics H3351 report developed and validated the Composed Weibull point model. | Established the two-branch distribution, its calibration database, the slope-dependent transition, and the calculation recipe. |
 | 2000 | Battjes and Groenendijk published the Composite Weibull Distribution in *Coastal Engineering*. | Provides the principal scientific model implemented by this repository. |
 | 2012 | Caires and Van Gent examined finite-depth and constant-depth behaviour and clarified deep-water convergence and flat-bottom limitations. | Motivates the Rayleigh switch, Rayleigh caps, and explicit warnings for constant-depth applications. |
-| Present implementation | C++ GUI/CLI implement the same governing equations using a bracketed scalar solver. | Provides traceable wave statistics and a consistent engineering report. |
+| Present implementation | The source implementations solve the scalar RMS closure by Newton–Raphson in $z=\ln q$, initialized using an explicit approximation of $q(\tau)$. | Provides a positive transition exponent, analytical derivatives, convergence diagnostics, and consistent engineering reports. |
 
 ### From Gaussian surface elevation to individual wave heights
 
@@ -921,28 +921,82 @@ $$
 
 This is the nonlinear scalar equation solved in the Windows C++ program.
 
-### Bracketed solution in logarithmic coordinates
+### Newton–Raphson solution in logarithmic coordinates
 
-The code uses $z=\ln q$ so that $q=e^z>0$. It solves the logarithmic residual
+For the normalized transition $t=H_{tr}/H_{rms}>0$, define the positive terms
 
 $$
-R(z)=2\ln t+\ln\left[
-q^{-2/k_1}\gamma\left(1+\frac{2}{k_1},q\right)
-+q^{-2/k_2}\Gamma\left(1+\frac{2}{k_2},q\right)
-\right]=0.
+L(q)=q^{-1}\gamma(2,q),\qquad
+V(q)=q^{-5/9}\Gamma(14/9,q).
 $$
 
-The scalar residual is solved using a bracketed Brent method, combining bisection and interpolation. The solver checks the initial sign bracket, root convergence and reconstructed scale parameters. Invalid or non-finite states produce an explicit calculation error.
+The nonlinear RMS closure is
 
-The solver constants are:
+$$
+t^2[L(q)+V(q)]=1.
+$$
 
-| Parameter | Value |
+The solver uses the logarithmic unknown $z=\ln q$, so that $q=e^z>0$, and evaluates
+
+$$
+\boxed{R(z;t)=2\ln t+\ln[L(e^z)+V(e^z)]=0.}
+$$
+
+#### Explicit initialization
+
+The initial transition exponent is given by the following expression with fixed numeric coefficients:
+
+$$
+\boxed{
+q_0(t)=1.002054709\,t^2\tanh\!\left(t^{1.652259933}\right)
+\exp\!\left[-\tanh(\tanh t)\exp(-2.146235748\,t)\right].
+}
+$$
+
+The iteration begins at
+
+$$
+z_0=\ln q_0(t).
+$$
+
+This expression is an initial estimate only. The final transition exponent satisfies the complete second-moment equation to the specified convergence tolerance.
+
+#### Exact derivative and Newton step
+
+Differentiation with respect to $z=\ln q$ gives
+
+$$
+\frac{dL}{dz}=-L+qe^{-q},\qquad
+\frac{dV}{dz}=-\frac59V-qe^{-q}.
+$$
+
+The incomplete-gamma boundary terms cancel, yielding the analytical derivative
+
+$$
+\boxed{R'(z;t)=-\frac{L+(5/9)V}{L+V}.}
+$$
+
+The Newton–Raphson iteration is
+
+$$
+\boxed{z_{n+1}=z_n-\frac{R(z_n;t)}{R'(z_n;t)},\qquad q_n=e^{z_n}.}
+$$
+
+Because $L>0$ and $V>0$ for $q>0$, the derivative is strictly negative and lies between $-1$ and $-5/9$. No finite-difference derivative, two-variable Jacobian, or independent scale-parameter guess is required.
+
+#### Convergence and safeguards
+
+| Numerical setting | Value |
 |---|---:|
-| Regularized gamma relative tolerance | $2.5\times10^{-14}$ |
-| Maximum gamma iterations | 10,000 |
-| Maximum scalar iterations | 200 |
-| Final logarithmic root residual | $10^{-10}$ |
-| Moment and continuity acceptance | $10^{-10}$ |
+| Regularized incomplete-gamma relative tolerance | $2.5\times10^{-14}$ |
+| Maximum incomplete-gamma iterations | 10,000 |
+| Maximum Newton steps | 40 |
+| Logarithmic residual acceptance, $|R(z;t)|$ | $5\times10^{-13}$ |
+| Reconstructed moment and continuity residual limits | $10^{-10}$ |
+
+The solver rejects a non-positive initial estimate, a non-finite intermediate value, or a non-finite or non-negative derivative. Failure to meet the logarithmic residual tolerance within the iteration limit is reported explicitly. The completed calculation also checks the reconstructed Weibull scales and the two probability constraints.
+
+**Boundary case.** The mathematical continuation of the normalization equation has $q(0)=0$, with $q\sim[\Gamma(14/9)t^2]^{9/5}$ as $t\to0^+$. Since $\ln 0$ is undefined, $t=0$ is an analytical boundary limit, not a Newton iteration. The calculator's three strictly positive physical inputs give $t>0$.
 
 ### Verification of both CWD constraints
 
@@ -959,7 +1013,7 @@ $$
 R_c=\left(t/\widetilde H_1\right)^{k_1}-\left(t/\widetilde H_2\right)^{k_2}.
 $$
 
-The solution is accepted only if both absolute residuals are below $10^{-10}$. The report lists both residuals and the scalar iteration count; no empirical initial-scale guesses or finite-difference Jacobian are required.
+The solution is accepted only if both absolute residuals are below $10^{-10}$. The report lists both residuals and the Newton iteration count. The empirical $q_0(t)$ formula supplies the initial value of the scalar solve; the derivative is evaluated analytically and both Weibull scales are reconstructed from the converged root.
 
 ---
 
@@ -1021,7 +1075,7 @@ The report distinguishes uncapped means, Rayleigh reference means and final mean
 
 The CWD shape does approach Rayleigh as $\widetilde H_{tr}\rightarrow\infty$. That statement concerns normalized ratios based on the $H_{rms}$ used inside the CWD. It does not by itself guarantee that dimensional values obtained from the empirical finite-bandwidth $H_{rms}$ parameterization approach the exact Rayleigh values based on $H_{m0}$.
 
-The correction is therefore applied in dimensional space. This distinction prevents an apparently converged normalized distribution from producing an inconsistent dimensional upper tail.
+The Rayleigh limit is therefore applied in dimensional space. This distinction prevents an apparently converged normalized distribution from producing an inconsistent dimensional upper tail.
 
 ### Behaviour at the switch
 
@@ -1045,7 +1099,7 @@ For each valid input set, the Windows C++ software:
 1. Checks that $H_{m0}$, $d$, and $M$ are finite and strictly positive.
 2. Computes $m_0=(H_{m0}/4)^2$, $\mu=\sqrt{m_0}/d$, and empirical $H_{rms}$.
 3. Computes $\tan\alpha=1/M$, $H_{tr}$, and $t=H_{tr}/H_{rms}$.
-4. Uses Rayleigh directly when $t>2.75$; otherwise solves the CWD scalar equation for $q$.
+4. Uses Rayleigh directly when $t>2.75$; otherwise evaluates $q_0(t)$ and solves the scalar CWD closure by Newton–Raphson in $z=\ln q$.
 5. Reconstructs $\widetilde H_1$, $\widetilde H_2$ and verifies continuity and second moment.
 6. Computes thresholds $H_N$ and uncapped highest-fraction means for the six $N$ values.
 7. Calculates Rayleigh reference means $C_NH_{m0}$ and applies individual mean-height limits.
@@ -1065,7 +1119,11 @@ Htr   = (0.35 + 5.8 / M) * d
 t     = Htr / Hrms
 
 if t <= 2.75:
-    solve scalar moment equation in z = log(q)
+    q0 = 1.002054709*t^2*tanh(t^1.652259933)
+         * exp(-tanh(tanh(t))*exp(-2.146235748*t))
+    z = log(q0)
+    repeat Newton step z = z - R(z)/Rprime(z) until abs(R(z)) <= 5e-13
+    q = exp(z)
     H1tilde = t * q^(-1/2)
     H2tilde = t * q^(-1/3.6)
     check second-moment and continuity residuals
@@ -1203,7 +1261,7 @@ $$
 $$
 
 
-Because $\widetilde H_{tr}<2.75$, the `B&G` branch is used. The C++ implementation gives approximately:
+Because $\widetilde H_{tr}<2.75$, the `B&G` branch is used. The starting approximation gives $q_0\simeq0.8303316764$; Newton–Raphson converges in two steps to $q\simeq0.8312678123$. The calculated statistics are approximately:
 
 | Quantity | Result |
 |---|---:|
@@ -1408,15 +1466,17 @@ For overtopping or structural calculations, verify which wave-height definition 
 
 | File | Purpose |
 |---|---|
+| `shallow-water-waves_gui.cpp` | native Windows C++ graphical interface with DPI-aware, adaptive controls |
 | `shallow-water-waves_cli.cpp` | portable C++ command-line implementation |
-| `shallow-water-waves_gui.cpp` | native Windows C++ graphical interface |
 | `shallow-water-waves_cli.f90` | Fortran command-line implementation |
+| `shallow_water_waves.html` | standalone browser-based HTML/JavaScript calculator |
 | `shallow_water_waves.m` | MATLAB function returning a results structure |
 | `shallow-water-waves.ipynb` | Python/Jupyter implementation, tables, and plots |
+| `README.md` | physical background, calculation methods, interpretation, and usage |
+| `math.md` | probability distributions, scalar closure, Newton derivative, and mathematical analysis |
 | `weibull.apk` | Android application installation package |
-| `manual.md` | theory, equations, limitations, build instructions, and usage |
 
-The Windows C++ GUI and portable C++ CLI share the scalar CWD formulation and aligned report. Other implementations should be checked individually for numerical details and available diagnostics.
+The six source implementations use the same scalar Newton formulation and identical initialization constants. The C++ GUI and CLI share the engineering report layout; differences in incomplete-gamma evaluation and language-specific floating-point arithmetic can lead to small numerical differences. The Android application is a separate distributable.
 
 ---
 
@@ -1507,7 +1567,23 @@ Enter:
 - `Depth d (m)`;
 - `Slope 1:M` with the denominator $M$;
 
-then press **Compute**. The report is displayed in a monospaced output window and saved in UTF-8 as `report.txt`. Labels and numerical columns are aligned, and no extra blank lines follow the report.
+then select **Calculate** or press **Enter** in an input field. The report is displayed in a monospaced output window and saved in UTF-8 as `report.txt`. Labels and numerical columns are aligned, and no extra blank lines follow the report.
+
+### Interface layout
+
+The application positions each input label above its corresponding field, with a separate **Calculate** button and a calculation-status line. Controls are arranged dynamically according to the available client width: the fields and button fit on one row on wider windows and flow into two or more rows on narrower windows. The output area occupies the remaining window space and supports vertical and horizontal scrolling.
+
+Font sizes, control dimensions, margins, and the minimum window dimensions are DPI-aware. The layout responds to window resizing and display-scaling changes when moving between monitors, helping keep the input fields and the Calculate button fully visible. The startup window is positioned within the available monitor work area. The report uses a Consolas monospaced font, while the input controls use Segoe UI.
+
+---
+
+## Browser-based HTML calculator
+
+Open `shallow_water_waves.html` in a modern browser. The calculation runs locally in JavaScript and does not require installation or a network connection.
+
+Enter the local spectral significant wave height $H_{m0}$, still-water depth $d$, and the positive foreshore slope denominator $M$. Select **Calculate wave statistics** or press **Enter** to evaluate the model. **Reset** restores the default inputs. The results panel presents the selected distribution, characteristic wave heights, diagnostic parameters, and a detailed engineering report. The report can be copied or downloaded as `report.txt`.
+
+The scalar Composite Weibull branch uses Newton–Raphson in $z=\ln q$, with the initialization and analytical derivative defined above. The HTML application uses the same $t=2.75$ Rayleigh switching criterion and final mean-height limits as the source implementations.
 
 ---
 
@@ -1632,8 +1708,8 @@ The notebook contains:
 
 - theoretical background;
 - incomplete-gamma functions;
-- nonlinear solution with `fsolve`;
-- the empirical initialization formulas;
+- scalar Newton–Raphson iteration in $z=\ln q$ with an analytical derivative;
+- the explicit $q_0(t)$ initialization formula;
 - the main analysis workflow;
 - formatted result tables;
 - graphical analysis of the distribution and characteristic wave heights.
@@ -1649,10 +1725,10 @@ Recommended cross-language verification steps:
 1. Use identical $H_{m0}$, $d$, and $M$ input in GUI and CLI.
 2. Confirm the same distribution branch.
 3. Compare $m_0$, $H_{rms}$, $H_{tr}$, and $\widetilde H_{tr}$.
-4. For CWD, compare $q$, $\widetilde H_1$, $\widetilde H_2$, and both residuals.
+4. For CWD, compare the initialized $q_0$, the converged $q$, $\widetilde H_1$, $\widetilde H_2$, Newton iteration counts, and both residuals.
 5. Compare $H_N$, raw means, reference Rayleigh means, and final capped means.
 6. Compare normalized means, limit indicators and final diagnostic ratios.
-7. Confirm both residuals are below $10^{-10}$ for solved CWD cases.
+7. Confirm that the Newton logarithmic residual meets $5\times10^{-13}$ and both reconstructed constraints are below $10^{-10}$ for solved CWD cases.
 
 Minor floating-point differences are expected, but engineering outputs should agree to the displayed precision.
 
