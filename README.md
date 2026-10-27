@@ -939,7 +939,7 @@ $$
 The solver uses the logarithmic unknown $z=\ln q$, so that $q=e^z>0$, and evaluates
 
 $$
-\boxed{R(z;t)=2\ln t+\ln[L(e^z)+V(e^z)]=0.}
+R(z;t)=2\ln t+\ln[L(e^z)+V(e^z)]=0.
 $$
 
 #### Explicit initialization
@@ -947,10 +947,8 @@ $$
 The initial transition exponent is given by the following expression with fixed numeric coefficients:
 
 $$
-\boxed{
 q_0(t)=1.002054709\,t^2\tanh\!\left(t^{1.652259933}\right)
 \exp\!\left[-\tanh(\tanh t)\exp(-2.146235748\,t)\right].
-}
 $$
 
 The iteration begins at
@@ -973,13 +971,13 @@ $$
 The incomplete-gamma boundary terms cancel, yielding the analytical derivative
 
 $$
-\boxed{R'(z;t)=-\frac{L+(5/9)V}{L+V}.}
+R'(z;t)=-\frac{L+(5/9)V}{L+V}.
 $$
 
 The Newton–Raphson iteration is
 
 $$
-\boxed{z_{n+1}=z_n-\frac{R(z_n;t)}{R'(z_n;t)},\qquad q_n=e^{z_n}.}
+z_{n+1}=z_n-\frac{R(z_n;t)}{R'(z_n;t)},\qquad q_n=e^{z_n}.
 $$
 
 Because $L>0$ and $V>0$ for $q>0$, the derivative is strictly negative and lies between $-1$ and $-5/9$. No finite-difference derivative, two-variable Jacobian, or independent scale-parameter guess is required.
