@@ -480,7 +480,7 @@ static std::wstring format_report(const Analysis& r) {
 
     out << L"\nLOCAL WAVE PARAMETERS\n";
     report_field(out, L"Spectral variance m0 (m^2)",
-                 report_number(r.m0, 9, true));
+                 report_number(r.m0));
     report_field(out, L"Individual-wave Hrms (m)",
                  report_number(r.Hrms));
     report_field(out, L"Degree of saturation sqrt(m0)/d",

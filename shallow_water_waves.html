@@ -794,7 +794,7 @@ function formatReport(r) {
     reportField('Foreshore slope', reportSlope(r.slope_denominator)),
     reportField('tan(alpha)', reportNumber(r.slope)),
     '', 'LOCAL WAVE PARAMETERS',
-    reportField('Spectral variance m0 (m^2)', reportNumber(r.m0, 9, true)),
+    reportField('Spectral variance m0 (m^2)', reportNumber(r.m0)),
     reportField('Individual-wave Hrms (m)', reportNumber(r.Hrms)),
     reportField('Degree of saturation sqrt(m0)/d', reportNumber(r.saturation)),
     reportField('Transitional wave height Htr (m)', reportNumber(r.Htr)),
@@ -892,7 +892,7 @@ function renderResults(r, report) {
     <td>${s.rayleigh_limit_applied ? '<span class="limit-yes">YES</span>' : 'NO'}</td>
   </tr>`).join('');
   const parameters = [
-    parameterRow('Spectral variance, m0', reportNumber(r.m0, 9, true), 'm²'),
+    parameterRow('Spectral variance, m0', reportNumber(r.m0), 'm²'),
     parameterRow('Foreshore tangent, tan(α)', displayNum(r.slope, 6)),
     parameterRow('Degree of saturation', displayNum(r.saturation, 6)),
     parameterRow('Normalized transition, Htr/Hrms', displayNum(r.transition_normalized, 6)),

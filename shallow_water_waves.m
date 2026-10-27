@@ -9,9 +9,9 @@ function results = shallow_water_waves(HM0, DEPTH, M)
 %
 %   Example: R = shallow_water_waves(2.5, 5.0, 100);
 
-    validateattributes(HM0, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'HM0', 1);
-    validateattributes(DEPTH, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'DEPTH', 2);
-    validateattributes(M, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'M', 3);
+    validate_positive_scalar(HM0, 'HM0');
+    validate_positive_scalar(DEPTH, 'DEPTH');
+    validate_positive_scalar(M, 'M');
     HM0 = double(HM0); DEPTH = double(DEPTH); M = double(M);
     k1 = 2.0; k2 = 3.6;
     ns = [3 10 50 100 250 1000];
@@ -59,7 +59,7 @@ function results = shallow_water_waves(HM0, DEPTH, M)
         m2 = a1^2*gamma_lower(1+2/k1,q) + a2^2*gamma_upper(1+2/k2,q);
         results.moment_residual = sqrt(m2)-1;
         results.continuity_residual = (t/a1)^k1-(t/a2)^k2;
-        if ~isfinite(m2) || abs(results.moment_residual)>1e-10 || ...
+        if ~finite_value(m2) || abs(results.moment_residual)>1e-10 || ...
                 abs(results.continuity_residual)>1e-10
             error('CWD probability constraints were not satisfied.');
         end
@@ -118,40 +118,121 @@ function results = shallow_water_waves(HM0, DEPTH, M)
     end
     results.statistics = statistics;
     report = format_report(results);
-    fid = fopen('report.txt','w','n','UTF-8');
+    % FreeMat 4.2: fwrite returns the byte count for a binary write.
+    % The report contains ASCII text; write its bytes without text-mode
+    % translation or assumptions about fprintf's return value.
+    bytes = uint8(report);
+    fid = fopen('report.txt','w');
     if fid < 0, error('Could not open report.txt for writing.'); end
-    try
-        nwrite = fprintf(fid,'%s',report);
-        if nwrite < numel(report), error('Incomplete report write.'); end
-        if fclose(fid)~=0, error('Could not close report.txt.'); end
-    catch ME
-        fclose(fid);
-        rethrow(ME);
+    nwrite = fwrite(fid, bytes, 'uint8');
+    fclose(fid);
+    if nwrite ~= length(bytes)
+        error('Could not write report.txt completely.');
     end
     if nargout==0, fprintf('%s\n',report); end
 end
 
+% Finite-value predicate compatible with FreeMat 4.2.
+% For finite real values x-x is zero; NaN and infinities produce NaN.
+function ok = finite_value(x)
+    ok = (x == x) && ((x - x) == 0);
+end
+
 function v = positive(v, name)
-    if ~(isfinite(v) && v>0), error('%s must be finite and positive.',name); end
+    if ~(finite_value(v) && v>0), error('%s must be finite and positive.',name); end
+end
+
+function validate_positive_scalar(x, name)
+    if ~isnumeric(x) || ~isreal(x) || length(x) ~= 1 || ...
+            ~finite_value(x) || x <= 0
+        error('%s must be a finite positive real scalar.', name);
+    end
 end
 
 function y = gamma_lower(a,x)
-    y = gamma(a)*gammainc(x,a,'lower');
+    [p,q] = gamma_regularized_pair(a,x);
+    y = gamma(a)*p;
 end
 
 function y = gamma_upper(a,x)
-    y = gamma(a)*gammainc(x,a,'upper');
+    [p,q] = gamma_regularized_pair(a,x);
+    y = gamma(a)*q;
+end
+
+function [p,q] = gamma_regularized_pair(a,x)
+    if ~finite_value(a) || a<=0 || ~finite_value(x) || x<0
+        error('Invalid incomplete gamma arguments.');
+    end
+    if x==0
+        p=0; q=1; return;
+    end
+    tol=2.5e-14;
+    maxIter=10000;
+    factor=exp(a*log(x)-x-log(gamma(a)));
+    if x<a+1
+        ap=a; delta=1/a; total=delta; converged=0;
+        for n=1:maxIter
+            ap=ap+1;
+            delta=delta*x/ap;
+            total=total+delta;
+            if abs(delta)<=tol*abs(total)
+                converged=1; break;
+            end
+        end
+        if ~converged, error('Incomplete gamma series did not converge.'); end
+        p=total*factor; q=1-p;
+    else
+        fpmin=1e-300;
+        b=x+1-a; c=1/fpmin; d=1/b; fraction=d; converged=0;
+        for n=1:maxIter
+            an=-n*(n-a);
+            b=b+2;
+            d=an*d+b;
+            if abs(d)<fpmin, d=sign_nonzero(d)*fpmin; end
+            c=b+an/c;
+            if abs(c)<fpmin, c=sign_nonzero(c)*fpmin; end
+            d=1/d;
+            delta=c*d;
+            fraction=fraction*delta;
+            if abs(delta-1)<=tol
+                converged=1; break;
+            end
+        end
+        if ~converged, error('Incomplete gamma continued fraction did not converge.'); end
+        q=fraction*factor; p=1-q;
+    end
+    if ~finite_value(p) || ~finite_value(q) || p < -2e-13 || q < -2e-13 || ...
+            p > 1+2e-13 || q > 1+2e-13
+        error('Incomplete gamma probability outside valid range.');
+    end
+    p=max(0,min(1,p)); q=max(0,min(1,q));
+end
+
+function y=sign_nonzero(x)
+    if x<0, y=-1; else, y=1; end
 end
 
 function y = gamma_interval(a,lo,hi)
     if hi==lo, y=0; return; end
-    if ~(isfinite(lo) && isfinite(hi) && lo>=0 && hi>=lo)
+    if ~finite_value(lo) || ~finite_value(hi) || lo<0 || hi<lo
         error('Invalid incomplete gamma integration interval.');
     end
-    % Direct integration avoids subtracting nearly equal tail functions.
-    y = integral(@(u)u.^(a-1).*exp(-u),lo,hi, ...
-        'RelTol',2e-13,'AbsTol',1e-14);
-    y = positive(y,'Gamma interval integral');
+    % Sixteen-point Gauss-Legendre quadrature.
+    nodes=[0.09501250983763744 0.28160355077925891 ...
+           0.45801677765722739 0.61787624440264375 ...
+           0.75540440835500303 0.86563120238783174 ...
+           0.94457502307323258 0.98940093499164993];
+    weights=[0.18945061045506850 0.18260341504492359 ...
+             0.16915651939500254 0.14959598881657673 ...
+             0.12462897125553387 0.09515851168249278 ...
+             0.06225352393864789 0.02715245941175409];
+    midpoint=(lo+hi)/2; half=(hi-lo)/2; total=0;
+    for i=1:8
+        u1=midpoint-half*nodes(i);
+        u2=midpoint+half*nodes(i);
+        total=total+weights(i)*(u1^(a-1)*exp(-u1)+u2^(a-1)*exp(-u2));
+    end
+    y=positive(total*half,'Gamma interval integral');
 end
 
 function [q, z, iterations] = solve_transition_exponent(t, k1, k2)
@@ -174,7 +255,7 @@ function [q, z, iterations] = solve_transition_exponent(t, k1, k2)
             break;
         end
         z = z - residual/derivative;
-        if ~isfinite(z)
+        if ~finite_value(z)
             error('Non-finite Newton iteration.');
         end
     end
@@ -189,7 +270,7 @@ function [residual, derivative] = evaluate_log_moment(z, logt, k1, k2)
     residual = 2*logt + log(kernel);
     % Exact logarithmic derivative; the gamma boundary terms cancel.
     derivative = -((2/k1)*lower+(2/k2)*upper)/kernel;
-    if ~isfinite(residual) || ~isfinite(derivative) || ~(derivative < 0)
+    if ~finite_value(residual) || ~finite_value(derivative) || ~(derivative < 0)
         error('Invalid Newton residual or derivative.');
     end
 end
@@ -201,12 +282,17 @@ function text = format_report(r)
     lines{end+1}=''; lines{end+1}='INPUT PARAMETERS';
     lines{end+1}=field('Spectral significant wave height Hm0 (m)',sprintf('%.4f',r.Hm0));
     lines{end+1}=field('Still-water depth d (m)',sprintf('%.4f',r.d));
-    slopeText = regexprep(sprintf('%.4f',r.slopeM),'0+$','');
-    slopeText = regexprep(slopeText,'\.$','');
+    slopeText = sprintf('%.4f',r.slopeM);
+    while length(slopeText)>0 && slopeText(length(slopeText))=='0'
+        slopeText=slopeText(1:length(slopeText)-1);
+    end
+    if length(slopeText)>0 && slopeText(length(slopeText))=='.'
+        slopeText=slopeText(1:length(slopeText)-1);
+    end
     lines{end+1}=field('Foreshore slope',['1:' slopeText]);
     lines{end+1}=field('tan(alpha)',sprintf('%.6f',r.tanAlpha));
     lines{end+1}=''; lines{end+1}='LOCAL WAVE PARAMETERS';
-    lines{end+1}=field('Spectral variance m0 (m^2)',sprintf('%.9e',r.m0));
+    lines{end+1}=field('Spectral variance m0 (m^2)',sprintf('%.6f',r.m0));
     lines{end+1}=field('Individual-wave Hrms (m)',sprintf('%.6f',r.Hrms));
     lines{end+1}=field('Degree of saturation sqrt(m0)/d',sprintf('%.6f',r.saturation));
     lines{end+1}=field('Transitional wave height Htr (m)',sprintf('%.6f',r.Htr));
@@ -229,18 +315,21 @@ function text = format_report(r)
     lines{end+1}=statrow('HIGHEST','H_N','RAW MEAN','RAYLEIGH','FINAL MEAN','LIMIT');
     lines{end+1}=statrow('FRACTION','THRESHOLD','H_(1/N)','H_(1/N)','H_(1/N)','APPLIED');
     lines{end+1}=['  ' repmat('-',1,70)];
-    for s=r.statistics
+    for si=1:length(r.statistics)
+        s=r.statistics(si);
         if s.rayleigh_limit_applied, limit='YES'; else, limit='NO'; end
         lines{end+1}=statrow(sprintf('1/%d',s.N),sprintf('%.4f',s.threshold), ...
             sprintf('%.4f',s.mean_unlimited),sprintf('%.4f',s.rayleigh_mean), ...
             sprintf('%.4f',s.mean_final),limit);
     end
     lines{end+1}=''; lines{end+1}='FINAL NORMALIZED MEAN-HIGH-WAVE HEIGHTS';
-    for s=r.statistics
+    for si=1:length(r.statistics)
+        s=r.statistics(si);
         lines{end+1}=field(sprintf('H_(1/%d) / Hrms',s.N),sprintf('%.7f',s.mean_normalized));
     end
     lines{end+1}=''; lines{end+1}='RATIOS RELATIVE TO THE HIGHEST ONE THIRD';
-    for s=r.statistics(2:end)
+    for si=2:length(r.statistics)
+        s=r.statistics(si);
         lines{end+1}=field(sprintf('H_(1/%d) / H_(1/3)',s.N), ...
             sprintf('%.6f',s.mean_final/r.statistics(1).mean_final));
     end
@@ -273,7 +362,11 @@ function text = format_report(r)
             lines{end+1}='  Interpretation requires engineering assessment.';
         end
     end
-    text = strjoin(lines,sprintf('\n'));
+    text = '';
+    for li=1:length(lines)
+        if li>1, text=[text sprintf('\n')]; end
+        text=[text lines{li}];
+    end
 end
 
 function str = field(label,value,right)

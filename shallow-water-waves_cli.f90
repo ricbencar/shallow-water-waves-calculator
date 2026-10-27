@@ -490,7 +490,7 @@ contains
         call field_add(b, 'tan(alpha)', report_number(r%slope))
         call line_add(b, '')
         call line_add(b, 'LOCAL WAVE PARAMETERS')
-        call field_add(b, 'Spectral variance m0 (m^2)', report_number(r%m0,9,.true.))
+        call field_add(b, 'Spectral variance m0 (m^2)', report_number(r%m0))
         call field_add(b, 'Individual-wave Hrms (m)', report_number(r%hrms))
         call field_add(b, 'Degree of saturation sqrt(m0)/d', report_number(r%saturation))
         call field_add(b, 'Transitional wave height Htr (m)', report_number(r%htr))
