@@ -470,7 +470,7 @@ The normalization equation is equivalent to $R(z;\tau)=0$.
 
 #### Explicit starting approximation
 
-The initial value for the numerical iteration is
+An initial transition exponent is given by the following expression (Carvalho, 2026):
 
 $$
 \boxed{

@@ -944,7 +944,7 @@ $$
 
 #### Explicit initialization
 
-The initial transition exponent is given by the following expression with fixed numeric coefficients:
+An initial transition exponent is given by the following expression (Carvalho, 2026):
 
 $$
 q_0(t)=1.002054709\,t^2\tanh\!\left(t^{1.652259933}\right)
