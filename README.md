@@ -919,7 +919,7 @@ t^2\left[\frac{\gamma(2,q)}q+
 q^{-5/9}\Gamma\left(\frac{14}{9},q\right)\right]=1.
 $$
 
-This is the nonlinear scalar equation solved in the Windows C++ program.
+This is the nonlinear scalar equation solved by the calculator.
 
 ### Newton–Raphson solution in logarithmic coordinates
 
